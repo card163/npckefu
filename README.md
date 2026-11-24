@@ -52,6 +52,8 @@
 | POST /v1/sessions/{id}/rating | 租户 | 租户服务端代访客提交评价 `{score, comment}`（评价入口在租户自己的 App 里时用） |
 | GET /v1/ratings?agent=&min_score=&max_score=&limit=&before= | 租户 | 评价列表，按会话 ID 倒序，`before` 翻页 |
 | GET /v1/stats/ratings?from=&to=&agent= | 租户 | 评价统计：数量、均分、满意率、1~5 分分布、各坐席均分。`from`/`to` 为 RFC3339 或 `YYYY-MM-DD`（`to` 为纯日期时含当天），默认最近 30 天 |
+| POST /v1/sessions/{id}/transfer | 租户 | 主管/租户代为转接 `{to_agent｜skill_group, note}`（都不填=退回队列），不要求是当前接待坐席 |
+| GET /v1/sessions/{id}/transfers | 租户 | 该会话的转接历史（谁转给谁、备注、时间） |
 | PUT/GET/DELETE /v1/webhook | 租户 | 配置消息回调地址；PUT `{url, rotate_secret?}` 返回签名密钥 `secret` |
 | POST/GET /v1/sensitive-words, DELETE /v1/sensitive-words/{id} | 租户 | 敏感词库：POST `{words:[…], action:"mask"\|"block"}`（单词≥2字，每租户≤5000） |
 | PUT /v1/accounts/{accid}/devices, DELETE …/devices/{token} | 租户 | 登记/删除推送设备 `{platform, token}`（也可由客户端经 WS `device` 自行登记） |
@@ -60,6 +62,17 @@
 客户端 → 服务端 `op`: `start`(访客开始咨询) · `send`{session_id,client_msg_id,type,body} · `sync`{session_id,since_seq} · `close` · `typing` · `ping`
 客户端另有：`recent`{include_closed}（最近会话+未读）· `read`{session_id,seq}（推进已读游标，不会超过最新 seq，并同步给同账号其他端）
 服务端 → 客户端 `op`: `session` · `msg` · `ack` · `queue`{position} · `synced` · `recent` · `read` · `typing` · `error`
+
+## 坐席转接
+坐席在工作台点“转接”，或经 WebSocket：`{"op":"transfer","session_id":…,"to_agent":"…"|"skill_group":"…","note":"…"}`（`{"op":"agents"}` 取同事名单：在线状态、当前接待数/上限、技能组）。三种方式：
+- **指定坐席**（`to_agent`）：目标必须**在线且未满载**，否则直接报错（不会悄悄排队）；成功后立即生效。
+- **转到技能组**（`skill_group`，技能组必须存在）：会话重新排队，由该组在线且未满载的坐席接手。
+- **退回队列**（都不填）：交给其他坐席。
+- 后两种**不会分回给发起转接的坐席**；若组内没有别的在线坐席，会话保持排队，直到有人上线（原坐席不会被兜底分回）。
+- **转接备注**（≤500 字）只给接手的坐席（工作台弹出提示）和租户回调，**不会出现在访客的消息里**。
+- 只有会话当前的接待坐席能转接；会话必须是进行中；每个会话最多转接 **10** 次（防止来回踢皮球）。
+- 并发安全：改派是带条件的更新（仍进行中且仍属于原坐席），与“结束会话”“另一次转接”竞争时只有一方成功，另一方收到“会话状态已变化”；直接转给指定坐席时，容量检查与改派在同一把分配锁内，不会把目标转超。
+- 访客会看到系统提示（“客服 X 已将您转接给客服 Y”/“正在为您转接其他客服”）；原坐席收到会话已转走的通知，工作台自动移除；每次转接写入审计记录，并产生 `session.transferred` 回调（含 `from_agent`、`to_agent`、`skill_group`、`note`）。排队转接被接手时另会产生 `session.assigned`。
 
 ## 会话评价
 - 会话**结束后**，访客可打 1~5 分并附评语（≤500 字，选填）：WebSocket `{"op":"rate","session_id":…,"score":5,"comment":"…"}`，成功返回 `{op:"rated"}`。内置访客页会在会话结束时自动弹出评价卡片。
@@ -101,7 +114,7 @@
 - 一个 token 同时只属于一个账号（同机换号登录时自动转移）；每账号最多保留最近 10 台设备。
 
 ## 消息回调（抄送）
-配置 `PUT /v1/webhook` 后，以下事件会 POST 到你的地址：`message.created`（所有消息，含机器人/系统/服务端下发）、`message.moderated`、`push.offline`、`presence.changed`、`session.rated`、`session.created` / `session.queued` / `session.assigned` / `session.closed`。
+配置 `PUT /v1/webhook` 后，以下事件会 POST 到你的地址：`message.created`（所有消息，含机器人/系统/服务端下发）、`message.moderated`、`push.offline`、`presence.changed`、`session.rated`、`session.transferred`、`session.created` / `session.queued` / `session.assigned` / `session.closed`。
     POST <url>   {"event_id":123,"type":"message.created","created_at":<ms>,"data":{"session":{...},"message":{...}}}
     X-Kefu-Event-Id / X-Kefu-Event-Type / X-Kefu-Timestamp(秒) / X-Kefu-Signature: sha256=hex(HMAC_SHA256(secret, timestamp + "." + body))
 - 返回 2xx 即成功；否则按 10s、30s、2m、10m、30m、1h、3h 退避重试，共 8 次后标记 dead。
@@ -115,5 +128,5 @@ cmd/server 入口 · internal/store 持久化 · internal/bot FAQ+LLM 应答 · 
 ## 已知限制 / 下一步
 - 存储为 MySQL 8（InnoDB/utf8mb4）；表结构在 store.schema 中自动创建，后续演进建议改用 golang-migrate 等迁移工具。
 - 多实例下，节点**崩溃**（非优雅停机）时，其上的连接在 30 秒 TTL 后自动失效，在线状态查询随之正确，但**不会产生** `presence.changed` 离线事件、也不更新 `last_seen_at`（没有节点观察到“断开”）。
-- 坐席掉线时其进行中会话不自动回收；缺少内置厂商推送通道、图片内容审核、对象存储、转接给指定坐席、语音/视频/文件消息、管理后台前端、全局接口限流（目前只有上传限流）。
+- 坐席掉线时其进行中会话不自动回收；缺少内置厂商推送通道、图片内容审核、对象存储、语音/视频/文件消息、管理后台前端、全局接口限流（目前只有上传限流）。
 - CheckOrigin 目前放开，需按租户域名白名单。

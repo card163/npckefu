@@ -153,6 +153,13 @@ var schema = []string{
   agent_accid VARCHAR(64) NOT NULL DEFAULT '', score TINYINT NOT NULL, comment VARCHAR(1000) NOT NULL DEFAULT '',
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   KEY idx_tenant_time(tenant_id, created_at), KEY idx_agent_time(tenant_id, agent_accid, created_at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+	// 坐席转接记录（审计 + 排队转接的待处理标记）。to_agent 为空且 done=0 表示"已退回队列/技能组，尚未被接手"。
+	`CREATE TABLE IF NOT EXISTS session_transfers(
+  id BIGINT AUTO_INCREMENT PRIMARY KEY, tenant_id BIGINT NOT NULL, session_id BIGINT NOT NULL,
+  from_agent VARCHAR(64) NOT NULL, to_agent VARCHAR(64) NOT NULL DEFAULT '', skill_group VARCHAR(64) NOT NULL DEFAULT '',
+  note VARCHAR(1000) NOT NULL DEFAULT '', done TINYINT NOT NULL DEFAULT 0,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  KEY idx_session(tenant_id, session_id, id), KEY idx_pending(tenant_id, done, session_id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 	`CREATE TABLE IF NOT EXISTS faqs(
   id BIGINT AUTO_INCREMENT PRIMARY KEY, tenant_id BIGINT NOT NULL,
   question VARCHAR(512) NOT NULL, answer TEXT NOT NULL, keywords VARCHAR(512) NOT NULL DEFAULT '',

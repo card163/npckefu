@@ -29,16 +29,27 @@ button.d{background:#e5e7eb;color:#333}
 #toasts{position:fixed;top:56px;right:16px;display:flex;flex-direction:column;gap:8px;z-index:9}
 .toast{background:#1f2a44;color:#fff;padding:10px 14px;border-radius:8px;max-width:320px;box-shadow:0 4px 12px #0003;word-break:break-word}
 .toast b{color:#f5a623;letter-spacing:2px}
+#head{gap:8px}#head button{white-space:nowrap}
+#xfer-mask{position:fixed;inset:0;background:#0006;display:flex;align-items:center;justify-content:center;z-index:20}
+#xfer{background:#fff;border-radius:10px;padding:18px;width:380px;max-width:92vw;display:flex;flex-direction:column;gap:10px}
+#xfer h3{margin:0}#xfer select,#xfer textarea{padding:8px;border:1px solid #d5d9e0;border-radius:6px;font:inherit;width:100%}
+#xfer textarea{height:70px;resize:none}#xfer .row{display:flex;gap:8px;justify-content:flex-end}
+#xfer small{color:#888}
 .empty{margin:auto;color:#999}
 </style></head><body>
 <form id="login"><h3 style="margin:0">坐席登录</h3>
 <input id="ak" placeholder="appkey" required><input id="ac" placeholder="accid" required><input id="tk" placeholder="token" required><button>登录</button></form>
 <div id="toasts"></div>
+<div id="xfer-mask" hidden><div id="xfer"><h3>转接会话</h3>
+  <select id="xt"></select>
+  <textarea id="xn" maxlength="500" placeholder="转接备注（选填，仅接手的同事可见，访客看不到）"></textarea>
+  <small id="xh"></small>
+  <div class="row"><button type="button" class="d" id="xc">取消</button><button type="button" id="xok">确认转接</button></div></div></div>
 <div id="top" hidden><b>客服工作台 · <span id="me"></span></b><span id="st">连接中…</span></div>
 <div id="main" hidden>
   <div id="side"></div>
   <div id="chat"><div class="empty" id="empty">选择左侧会话开始接待</div>
-    <div id="head" hidden><span id="title"></span><button class="d" id="end">结束会话</button></div>
+    <div id="head" hidden><span id="title"></span><span><button class="d" id="xferbtn">转接</button> <button class="d" id="end">结束会话</button></span></div>
     <div id="msgs" hidden></div>
     <form id="bar" hidden><label class="clip" title="发送图片">📎<input type="file" id="file" accept="image/jpeg,image/png,image/gif,image/webp" hidden></label><input id="in" placeholder="输入回复，回车发送" autocomplete="off"><button>发送</button></form>
   </div>
@@ -59,11 +70,11 @@ setInterval(()=>ws&&ws.readyState===1&&send({op:'ping'}),20000);
 const send=o=>ws&&ws.readyState===1&&ws.send(JSON.stringify(o));
 function on(ev){
   if(ev.op==='session'){const x=ev.session;
-    if(x.status==='closed'){delete S[x.id];if(cur.id===x.id){cur.id=0}return render()}
+    if(x.status!=='active'||x.agent_accid!==cfg.ac){delete S[x.id];if(cur.id===x.id){cur.id=0}return render()} // 已结束、已转走或退回队列
     if(!S[x.id]){S[x.id]={info:x,msgs:[],seen:new Set(),last:0,unread:0};send({op:'sync',session_id:x.id,since_seq:0})} else S[x.id].info=x;
     if(!cur.id)cur.id=x.id; render()}
   else if(ev.op==='recent'){ // 服务端最近会话：未读数以服务端为准（刷新/换设备后不丢）
-    ev.recent.forEach(it=>{if(it.status==='closed')return;
+    ev.recent.forEach(it=>{if(it.status!=='active'||it.agent_accid!==cfg.ac)return;
       if(!S[it.id]){S[it.id]={info:it,msgs:[],seen:new Set(),last:0,unread:0};send({op:'sync',session_id:it.id,since_seq:0})}
       S[it.id].unread=it.id===cur.id?0:it.unread});
     if(!cur.id&&ev.recent.length){const f=ev.recent.find(x=>x.status!=='closed');if(f)cur.id=f.id}
@@ -72,6 +83,9 @@ function on(ev){
   else if(ev.op==='msg')add(ev.message,true);
   else if(ev.op==='synced')ev.messages.forEach(m=>add(m,false));
   else if(ev.op==='typing'&&ev.session_id===cur.id){$('title').dataset.t=1;setTimeout(()=>delete $('title').dataset.t,2500);render()}
+  else if(ev.op==='agents')fillRoster(ev.agents||[]);
+  else if(ev.op==='transfer_ok'){$('xfer-mask').hidden=true}
+  else if(ev.op==='transferred'){toast('会话 #'+ev.session_id+' 由 '+ev.from+' 转入'+(ev.note?'：'+ev.note:''))}
   else if(ev.op==='rated'){const t=document.createElement('div');t.className='toast';const b=document.createElement('b');b.textContent='★'.repeat(ev.score)+'☆'.repeat(5-ev.score);
     t.append('访客 '+ev.from+' 评价了会话 #'+ev.session_id+'：',b);if(ev.comment)t.append('  '+ev.comment);$('toasts').append(t);setTimeout(()=>t.remove(),10000)}
   else if(ev.op==='error')alert(ev.error);
@@ -119,6 +133,21 @@ function render(){
 $('bar').onsubmit=e=>{e.preventDefault();const v=$('in').value.trim();if(!v||!cur.id)return;
   send({op:'send',session_id:cur.id,client_msg_id:crypto.randomUUID(),type:'text',body:v});$('in').value=''};
 $('in').oninput=()=>cur.id&&send({op:'typing',session_id:cur.id});
+function toast(text){const t=document.createElement('div');t.className='toast';t.textContent=text;$('toasts').append(t);setTimeout(()=>t.remove(),12000)}
+// ---- 转接：指定在线同事 / 技能组 / 退回队列 ----
+function fillRoster(list){
+  const sel=$('xt');sel.replaceChildren();const add=(v,t,dis)=>{const o=document.createElement('option');o.value=v;o.textContent=t;o.disabled=!!dis;sel.append(o)};
+  const groups=new Set();
+  list.filter(a=>a.accid!==cfg.ac).forEach(a=>{if(a.skill_group)groups.add(a.skill_group);
+    add('agent:'+a.accid,`${a.name||a.accid}${a.skill_group?' ['+a.skill_group+']':''}  ${a.online?'在线':'离线'} ${a.load}/${a.max_load}`,!a.online||a.load>=a.max_load)});
+  groups.forEach(g=>add('group:'+g,'转到技能组：'+g));
+  add('queue:','退回队列（交给其他坐席）');
+  const first=[...sel.options].find(o=>!o.disabled);if(first)sel.value=first.value;
+  $('xh').textContent='灰色项：对方离线或已满载，不能直接转。技能组/退回队列会重新排队，且不会分回给你。'}
+$('xferbtn').onclick=()=>{if(!cur.id)return;$('xn').value='';$('xt').replaceChildren();$('xfer-mask').hidden=false;send({op:'agents'})};
+$('xc').onclick=()=>{$('xfer-mask').hidden=true};
+$('xok').onclick=()=>{const v=$('xt').value;if(!v||!cur.id)return;const [k,id]=[v.slice(0,v.indexOf(':')),v.slice(v.indexOf(':')+1)];
+  const m={op:'transfer',session_id:cur.id,note:$('xn').value};if(k==='agent')m.to_agent=id;if(k==='group')m.skill_group=id;send(m)};
 $('end').onclick=()=>cur.id&&confirm('确定结束该会话？')&&send({op:'close',session_id:cur.id});
 if(saved&&new URLSearchParams(location.search).has('auto'))$('login').requestSubmit();
 </script></body></html>

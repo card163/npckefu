@@ -34,6 +34,8 @@ type Event struct {
 	Score       int                `json:"score,omitempty"`
 	Comment     string             `json:"comment,omitempty"`
 	From        string             `json:"from,omitempty"`
+	Note        string             `json:"note,omitempty"`
+	Agents      []RosterItem       `json:"agents,omitempty"`
 }
 
 type Conn struct {
@@ -230,6 +232,8 @@ type inbound struct {
 	Token         string `json:"token"`
 	Score         int    `json:"score"`
 	Comment       string `json:"comment"`
+	ToAgent       string `json:"to_agent"`
+	Note          string `json:"note"`
 }
 
 // ServeWS 登录鉴权：?appkey=&accid=&token=（token 由租户服务端通过注册接口下发）。
@@ -328,7 +332,7 @@ func (s *Service) handle(c *Conn, in inbound) {
 		}
 	}
 	fail := func(err error) {
-		if !errors.Is(err, ErrForbidden) && !errors.Is(err, ErrBadInput) && !errors.Is(err, ErrClosed) && !errors.Is(err, ErrSensitive) && !errors.Is(err, ErrBadFile) && !errors.Is(err, ErrNotClosed) && !errors.Is(err, ErrRateExpired) && !errors.Is(err, ErrAlreadyRated) && !errors.Is(err, store.ErrNotFound) {
+		if !isUserError(err) {
 			log.Printf("ws op=%s: %v", in.Op, err)
 			err = errors.New("internal error")
 		}
@@ -364,6 +368,27 @@ func (s *Service) handle(c *Conn, in inbound) {
 			return
 		}
 		reply(Event{Op: "recent", Recent: items})
+	case "agents": // 坐席查看同事名单（在线/负载），用于选择转接目标
+		if c.acc.Role != store.RoleAgent {
+			fail(ErrForbidden)
+			return
+		}
+		r, err := s.Roster(ctx, c.acc.TenantID)
+		if err != nil {
+			fail(err)
+			return
+		}
+		reply(Event{Op: "agents", Agents: r})
+	case "transfer": // 坐席把自己的会话转给他人/技能组/退回队列
+		if c.acc.Role != store.RoleAgent {
+			fail(ErrForbidden)
+			return
+		}
+		if _, err := s.TransferAgent(ctx, c.acc.TenantID, c.acc.Accid, in.SessionID, TransferReq{ToAgent: in.ToAgent, SkillGroup: in.SkillGroup, Note: in.Note}); err != nil {
+			fail(err)
+			return
+		}
+		reply(Event{Op: "transfer_ok", SessionID: in.SessionID})
 	case "rate": // 访客评价已结束的会话
 		r, err := s.Rate(ctx, c.acc, in.SessionID, in.Score, in.Comment)
 		if err != nil {

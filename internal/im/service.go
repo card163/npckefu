@@ -247,19 +247,23 @@ func (s *Service) Transfer(ctx context.Context, sess *store.Session, skillGroup 
 }
 
 // Dispatch 把排队会话分配给在线且未满载的坐席（技能组匹配，负载最小优先）。
+// lockDispatch 获取租户级"分配/转接"锁（最多等 1 秒）。直接转接与排队分配共用它，保证坐席容量判断不被并发穿透。
+func (s *Service) lockDispatch(ctx context.Context, tenantID int64) (unlock func(), ok bool) {
+	for i := 0; i < 10; i++ {
+		if unlock, ok = s.Cl.Lock(ctx, fmt.Sprintf("dispatch:%d", tenantID), 15*time.Second); ok {
+			return unlock, true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return nil, false
+}
+
 func (s *Service) Dispatch(ctx context.Context, tenantID int64) {
 	// 跨节点互斥：避免两个节点同时分配导致坐席超配。拿不到锁说明别的节点正在分配，
 	// 若恰好漏掉了刚入队的会话，由 Run 里的兜底扫描在一个周期内补上。
-	var unlock func()
-	for i := 0; ; i++ {
-		var ok bool
-		if unlock, ok = s.Cl.Lock(ctx, fmt.Sprintf("dispatch:%d", tenantID), 15*time.Second); ok {
-			break
-		}
-		if i >= 10 {
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
+	unlock, ok := s.lockDispatch(ctx, tenantID)
+	if !ok {
+		return
 	}
 	defer unlock()
 	queued, err := s.St.QueuedSessions(ctx, tenantID)
@@ -271,7 +275,8 @@ func (s *Service) Dispatch(ctx context.Context, tenantID int64) {
 		return
 	}
 	load, _ := s.St.ActiveLoad(ctx, tenantID)
-	online := map[string]bool{} // 在线状态只查一次
+	pending, _ := s.St.PendingTransfers(ctx, tenantID) // 坐席转接退回队列的会话：排除原坐席，并把备注交给接手人
+	online := map[string]bool{}                        // 在线状态只查一次
 	for _, a := range agents {
 		online[a.Accid] = s.Hub.Online(tenantID, a.Accid)
 	}
@@ -281,6 +286,9 @@ func (s *Service) Dispatch(ctx context.Context, tenantID int64) {
 		for _, a := range agents {
 			if !online[a.Accid] || load[a.Accid] >= a.MaxLoad {
 				continue
+			}
+			if tr, ok := pending[q.ID]; ok && tr.FromAgent == a.Accid {
+				continue // 刚把会话转走的坐席不会又被分回去
 			}
 			if q.SkillGroup != "" && a.SkillGroup != q.SkillGroup {
 				continue
@@ -299,9 +307,18 @@ func (s *Service) Dispatch(ctx context.Context, tenantID int64) {
 		load[a.Accid]++
 		q.Status, q.AgentAccid = store.StatusActive, a.Accid
 		s.emit(tenantID, "session.assigned", map[string]any{"session": q})
+		tr, wasTransfer := pending[q.ID]
+		if wasTransfer {
+			if err := s.St.CompleteTransfer(ctx, tenantID, q.ID, a.Accid); err != nil {
+				log.Printf("complete transfer: %v", err)
+			}
+		}
 		s.systemMsg(ctx, &q, store.RoleSystem, fmt.Sprintf("客服 %s 为您服务", a.Name))
 		s.Hub.Push(tenantID, a.Accid, Event{Op: "session", Session: &q})
 		s.Hub.Push(tenantID, q.VisitorAccid, Event{Op: "session", Session: &q})
+		if wasTransfer { // 先会话后备注：与直接转接的推送顺序一致
+			s.Hub.Push(tenantID, a.Accid, Event{Op: "transferred", SessionID: q.ID, From: tr.FromAgent, Note: tr.Note})
+		}
 	}
 }
 
