@@ -10,6 +10,15 @@
     # 可选 LLM（OpenAI 兼容）：LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
     TEST_MYSQL_DSN='root:@tcp(127.0.0.1:3306)/npckefu_test' go test -race ./...   # 未设置则跳过需要数据库的测试
 
+## 管理后台
+`/admin.html`（内嵌，无需构建）。用租户的 **App Key / App Secret** 登录——这是租户所有者的凭证。页面：
+- **概览**（每 5 秒刷新）：排队/人工接待/机器人接待会话数、在线坐席、今日会话/消息/满意度、坐席负载、排队列表。
+- **会话**：按状态/坐席/访客筛选并翻页；点开查看完整聊天记录（含图片）、转接记录、访客评价；可**转接**、**强制结束**。
+- **坐席**：新增/编辑（名称、技能组、接待上限）、**重置令牌**（旧令牌立即失效并踢掉其连接）；新建/重置后显示一次登录信息。
+- **知识库**（增删改、搜索）、**敏感词**（批量添加、屏蔽/拒绝）、**评价**（区间统计、分布、各坐席、评价列表）、**回调**（地址、签名密钥显示/复制/轮换、投递记录与失败重试）、**接入**（App Key、访客页链接、iframe 嵌入代码）。
+- **安全与取舍**：Secret 只存在**当前标签页**的 sessionStorage，退出/关闭即清除，每次请求通过请求头发送，因此**务必使用 HTTPS**；页面用文本节点渲染所有数据（不使用 innerHTML），租户或访客提交的内容不会被当作 HTML 执行（已验证）。这是**单一租户凭证登录**，没有多管理员账号、角色权限和操作审计——需要时应加一层管理员账号体系，而不是把 Secret 发给更多人。
+- 目前不支持删除坐席、导出数据；坐席账号一旦创建只能编辑（防止删除后历史会话指向不存在的账号）。
+
 ## 多实例部署
 设置 `REDIS_ADDR`（可选 `REDIS_PASSWORD` / `REDIS_DB` / `NODE_ID`）即启用集群模式；不设置则为单实例模式，行为与之前一致。所有实例共用同一个 MySQL 和 Redis，前面放负载均衡（WebSocket 无需会话保持）。
 
@@ -41,7 +50,15 @@
 | POST /v1/accounts | X-App-Key/Secret | 注册/更新坐席或访客（返回 token）|
 | POST /v1/visitors/register | body.app_key | 访客自助注册 |
 | POST/GET/DELETE /v1/faqs | 租户 | 知识库 |
-| GET /v1/sessions, /v1/sessions/{id}/messages?since= | 租户 | 会话/消息查询 |
+| GET /v1/sessions?status=&agent=&visitor=&before=&limit= | 租户 | 会话检索，按 ID 倒序，`before` 翻页 |
+| GET /v1/sessions/{id}, /v1/sessions/{id}/messages?since= | 租户 | 单个会话 / 消息 |
+| POST /v1/sessions/{id}/close | 租户 | 强制结束会话（访客与坐席收到通知） |
+| GET /v1/tenant | 租户 | 校验凭证，返回租户名与 app_key（不含 secret） |
+| GET /v1/stats/overview?since= | 租户 | 概览：实时排队/接待/机器人会话数、坐席在线数，以及 since 起（默认 24 小时）的会话/消息/评价 |
+| GET /v1/agents/roster | 租户 | 坐席名单：在线、当前接待数/上限、技能组 |
+| PUT /v1/faqs/{id} | 租户 | 更新问答 |
+| POST /v1/accounts/{accid}/token | 租户 | 重置登录令牌，并立即断开该账号在所有节点上的连接 |
+| GET /v1/webhook/events?status=&before= , POST /v1/webhook/events/{id}/retry | 租户 | 回调投递记录；重试投递失败（dead）的事件 |
 | POST /v1/messages | 租户 | 服务端下发消息：`{session_id 或 to(访客accid), type, body, client_msg_id}`；同一 client_msg_id 幂等；发送者为 `business`(role=system)，客户端按通知样式展示；`to` 没有未关闭会话时自动新建 |
 | GET /v1/accounts/{accid}/presence | 租户 | 在线状态：`{online, connections(同时在线端数), last_seen_at(离线时)}`，账号不存在返回 404 |
 | POST /v1/presence | 租户 | 批量查询 `{accids:[…≤100]}`，按输入顺序返回，不存在的 `exists:false` |

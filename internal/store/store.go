@@ -107,7 +107,8 @@ var schema = []string{
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), closed_at DATETIME(3) NULL,
   KEY idx_visitor(tenant_id, visitor_accid, status),
   KEY idx_agent(tenant_id, agent_accid, status),
-  KEY idx_status(tenant_id, status, id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+  KEY idx_status(tenant_id, status, id),
+  KEY idx_tenant_created(tenant_id, created_at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 	// client_msg_id 为空时存 NULL：唯一索引允许多个 NULL，非空时用于幂等去重。
 	`CREATE TABLE IF NOT EXISTS messages(
   id BIGINT AUTO_INCREMENT PRIMARY KEY, tenant_id BIGINT NOT NULL,
@@ -115,6 +116,7 @@ var schema = []string{
   from_accid VARCHAR(64) NOT NULL, from_role VARCHAR(16) NOT NULL, type VARCHAR(16) NOT NULL, body TEXT NOT NULL,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   UNIQUE KEY uq_session_seq(session_id, seq),
+  KEY idx_tenant_time(tenant_id, created_at),
   UNIQUE KEY uq_client(session_id, from_accid, client_msg_id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 	// 已读游标：未读数 = seq > read_seq 且非己方、非内部系统消息。
 	`CREATE TABLE IF NOT EXISTS read_cursors(
@@ -212,7 +214,24 @@ func Open(dsn string) (*Store, error) {
 			return nil, fmt.Errorf("migrate: %w", err)
 		}
 	}
+	for _, ix := range [][3]string{
+		{"sessions", "idx_tenant_created", "tenant_id, created_at"},
+		{"messages", "idx_tenant_time", "tenant_id, created_at"},
+	} {
+		if err := st.ensureIndex(ctx, ix[0], ix[1], ix[2]); err != nil {
+			return nil, fmt.Errorf("migrate: %w", err)
+		}
+	}
 	return st, nil
+}
+
+func (s *Store) ensureIndex(ctx context.Context, table, name, cols string) error {
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND INDEX_NAME=?`, table, name).Scan(&n); err != nil || n > 0 {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, "ALTER TABLE "+table+" ADD INDEX "+name+" ("+cols+")")
+	return err
 }
 
 func (s *Store) ensureColumn(ctx context.Context, table, col, ddl string) error {

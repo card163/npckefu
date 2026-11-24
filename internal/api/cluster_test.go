@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
 
 	"npckefu/internal/api"
@@ -295,5 +296,28 @@ func TestReadyz(t *testing.T) {
 	r, err := http.Get(e.nodes[0].srv.URL + "/readyz")
 	if err != nil || r.StatusCode != 200 {
 		t.Fatalf("readyz: %v %v", err, r)
+	}
+}
+
+// 在节点 A 重置令牌，必须把该账号在节点 B 上的连接也踢掉。
+func TestClusterKickAcrossNodes(t *testing.T) {
+	e := newClusterEnv(t)
+	a, b := e.nodes[0], e.addNode(t, "node-b", 30*time.Second)
+	ag := e.agent(t, "kick-ag", 5)
+	ac := dial(t, b.srv.URL, e.tenant.AppKey, ag) // 连在 B
+	defer ac.Close()
+	time.Sleep(300 * time.Millisecond)
+	var tr map[string]string
+	if c := do(t, "POST", a.srv.URL+"/v1/accounts/kick-ag/token", e.h, nil, &tr); c != 200 { // 经 A 重置
+		t.Fatalf("reset: %d", c)
+	}
+	ac.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for {
+		if _, _, err := ac.ReadMessage(); err != nil {
+			if ce, ok := err.(*websocket.CloseError); !ok || ce.Code != websocket.ClosePolicyViolation {
+				t.Fatalf("connection on node B should be kicked, got %v", err)
+			}
+			return
+		}
 	}
 }

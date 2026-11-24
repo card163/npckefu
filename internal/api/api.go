@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -29,6 +30,8 @@ type API struct {
 	// Ready 就绪检查（数据库、Redis 等），供 /readyz 使用。
 	Ready []func(context.Context) error
 }
+
+var accidRe = regexp.MustCompile(`^[A-Za-z0-9_.@-]{1,64}$`)
 
 type ctxKey struct{}
 
@@ -77,6 +80,15 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/sensitive-words", a.tenantAuth(a.addWords))
 	mux.HandleFunc("GET /v1/sensitive-words", a.tenantAuth(a.listWords))
 	mux.HandleFunc("DELETE /v1/sensitive-words/{id}", a.tenantAuth(a.deleteWord))
+	mux.HandleFunc("GET /v1/tenant", a.tenantAuth(a.tenantInfo))
+	mux.HandleFunc("GET /v1/sessions/{id}", a.tenantAuth(a.getSession))
+	mux.HandleFunc("GET /v1/stats/overview", a.tenantAuth(a.overview))
+	mux.HandleFunc("GET /v1/agents/roster", a.tenantAuth(a.roster))
+	mux.HandleFunc("POST /v1/sessions/{id}/close", a.tenantAuth(a.closeSession))
+	mux.HandleFunc("PUT /v1/faqs/{id}", a.tenantAuth(a.updateFAQ))
+	mux.HandleFunc("POST /v1/accounts/{accid}/token", a.tenantAuth(a.resetToken))
+	mux.HandleFunc("GET /v1/webhook/events", a.tenantAuth(a.webhookEvents))
+	mux.HandleFunc("POST /v1/webhook/events/{id}/retry", a.tenantAuth(a.retryWebhookEvent))
 	mux.HandleFunc("POST /v1/sessions/{id}/transfer", a.tenantAuth(a.transferSession))
 	mux.HandleFunc("GET /v1/sessions/{id}/transfers", a.tenantAuth(a.listTransfers))
 	mux.HandleFunc("POST /v1/sessions/{id}/rating", a.tenantAuth(a.rateSession))
@@ -144,8 +156,16 @@ func (a *API) upsertAccount(w http.ResponseWriter, r *http.Request, t *store.Ten
 	if !decode(w, r, &in) {
 		return
 	}
-	if in.Accid == "" || (in.Role != store.RoleAgent && in.Role != store.RoleVisitor) {
-		writeErr(w, http.StatusBadRequest, "accid required; role must be agent|visitor")
+	if in.Role != store.RoleAgent && in.Role != store.RoleVisitor {
+		writeErr(w, http.StatusBadRequest, "role must be agent|visitor")
+		return
+	}
+	if !accidRe.MatchString(in.Accid) {
+		writeErr(w, http.StatusBadRequest, "accid: 1-64 chars of letters, digits, _ . @ -")
+		return
+	}
+	if len(in.Name) > 128 || len(in.SkillGroup) > 64 || in.MaxLoad < 0 || in.MaxLoad > 1000 {
+		writeErr(w, http.StatusBadRequest, "name<=128, skill_group<=64, max_load 0-1000 (0 = default 5)")
 		return
 	}
 	// 已存在账号不允许借 upsert 改角色，避免提权
@@ -210,7 +230,8 @@ func (a *API) deleteFAQ(w http.ResponseWriter, r *http.Request, t *store.Tenant)
 func (a *API) listSessions(w http.ResponseWriter, r *http.Request, t *store.Tenant) {
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	v, err := a.St.ListSessions(r.Context(), t.ID, q.Get("status"), q.Get("agent"), limit)
+	before, _ := strconv.ParseInt(q.Get("before"), 10, 64)
+	v, err := a.St.FindSessions(r.Context(), t.ID, store.SessionFilter{Status: q.Get("status"), Agent: q.Get("agent"), Visitor: q.Get("visitor"), BeforeID: before, Limit: limit})
 	respond(w, v, err)
 }
 

@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>管理后台</title>
+<style>
+:root{--pri:#2f6bff;--bg:#f0f2f5;--card:#fff;--line:#e5e7eb;--txt:#1f2937;--mut:#6b7280;--ok:#16a34a;--warn:#d97706;--err:#dc2626;--dark:#1f2a44}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;font:14px/1.55 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;color:var(--txt);background:var(--bg)}
+button,input,select,textarea{font:inherit}
+.btn{border:1px solid var(--line);background:#fff;color:var(--txt);padding:6px 14px;border-radius:6px;cursor:pointer;white-space:nowrap}
+.btn:hover{border-color:var(--pri);color:var(--pri)}
+.btn.primary{background:var(--pri);border-color:var(--pri);color:#fff}.btn.primary:hover{opacity:.9;color:#fff}
+.btn.danger{color:var(--err)}.btn.danger:hover{border-color:var(--err);color:var(--err)}
+.btn.sm{padding:2px 9px;font-size:12px}.btn:disabled{opacity:.5;cursor:not-allowed}
+input,select,textarea{padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;background:#fff;outline:none;max-width:100%}
+input:focus,select:focus,textarea:focus{border-color:var(--pri)}
+textarea{width:100%;resize:vertical}
+/* 登录 */
+#login{min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#1f2a44,#2f6bff)}
+#login form{background:#fff;padding:32px;border-radius:12px;width:380px;max-width:92vw;display:flex;flex-direction:column;gap:14px}
+#login h1{margin:0;font-size:20px}#login p{margin:0;color:var(--mut);font-size:12px}
+#login .err{color:var(--err);min-height:20px;font-size:13px}
+/* 外壳 */
+.shell{display:flex;min-height:100vh}
+.side{width:200px;background:var(--dark);color:#cbd5e1;display:flex;flex-direction:column;flex-shrink:0}
+.side .brand{padding:18px 20px;color:#fff;font-weight:700;font-size:16px}
+.side a{display:block;padding:11px 20px;color:#cbd5e1;text-decoration:none;border-left:3px solid transparent}
+.side a:hover{background:#ffffff14}.side a.on{background:#ffffff1f;color:#fff;border-left-color:var(--pri)}
+.main{flex:1;min-width:0;display:flex;flex-direction:column}
+.top{background:#fff;border-bottom:1px solid var(--line);padding:12px 24px;display:flex;justify-content:space-between;align-items:center}
+.top h2{margin:0;font-size:17px}.top .who{color:var(--mut);display:flex;gap:12px;align-items:center}
+.content{padding:20px 24px;flex:1}
+@media(max-width:760px){.side{width:64px}.side .brand,.side a span{display:none}.side a{padding:11px;text-align:center}.content{padding:12px}}
+/* 通用 */
+.panel{background:var(--card);border-radius:10px;padding:16px;box-shadow:0 1px 2px #0000000d;margin-bottom:16px;min-width:0}
+.panel h3{margin:0 0 12px;font-size:15px;display:flex;justify-content:space-between;align-items:center}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px;margin-bottom:16px}
+.card{background:var(--card);border-radius:10px;padding:16px;box-shadow:0 1px 2px #0000000d}
+.card .l{color:var(--mut);font-size:13px}.card .v{font-size:28px;font-weight:700;margin:4px 0}.card .s{color:var(--mut);font-size:12px}
+.card.warn .v{color:var(--warn)}.card.bad .v{color:var(--err)}.card.good .v{color:var(--ok)}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media(max-width:1000px){.two{grid-template-columns:1fr}}
+table{width:100%;border-collapse:collapse}th,td{padding:9px 10px;text-align:left;border-bottom:1px solid #f1f2f4;vertical-align:top}
+th{color:var(--mut);font-weight:500;font-size:12px;background:#fafafa}tr.click{cursor:pointer}tr.click:hover{background:#f7f9ff}
+.tablewrap{overflow-x:auto}
+.empty{color:var(--mut);text-align:center;padding:26px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.row.end{justify-content:flex-end;margin-top:14px}
+.bar{background:#eef1f5;border-radius:4px;height:8px;overflow:hidden;min-width:70px}.bar i{display:block;height:100%;background:var(--pri)}
+.bar.full i{background:var(--err)}
+.badge{white-space:nowrap;display:inline-block;padding:1px 9px;border-radius:10px;font-size:12px;background:#eef1f5;color:#475569}
+.badge.active,.badge.done{background:#dcfce7;color:#166534}.badge.queued,.badge.pending{background:#fef3c7;color:#92400e}
+.badge.bot{background:#e0e7ff;color:#3730a3}.badge.closed,.badge.dropped{background:#f1f5f9;color:#64748b}.badge.dead{background:#fee2e2;color:#991b1b}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#cbd5e1;margin-right:6px}.dot.on{background:var(--ok)}
+.mut{color:var(--mut)}.star{color:#f5a623;letter-spacing:1px}.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;word-break:break-all}
+.field{display:flex;flex-direction:column;gap:4px;margin-bottom:12px}.field label{font-weight:500}.field .hint{color:var(--mut);font-size:12px}
+.field input,.field select{width:100%}
+.dist{display:grid;grid-template-columns:36px 1fr 40px;gap:8px;align-items:center;margin:6px 0}
+/* 弹窗 / 抽屉 / 提示 */
+.mask{position:fixed;inset:0;background:#0006;display:flex;align-items:center;justify-content:center;z-index:50}
+.modal{background:#fff;border-radius:12px;padding:20px;width:480px;max-width:94vw;max-height:90vh;overflow:auto}
+.modal h3{margin:0 0 14px}
+.drawer-mask{position:fixed;inset:0;background:#0005;z-index:40;display:flex;justify-content:flex-end}
+.drawer{background:#fff;width:640px;max-width:100vw;height:100%;display:flex;flex-direction:column}
+.drawer header{padding:14px 18px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+.drawer .body{flex:1;overflow:auto;padding:16px 18px}
+.kv{display:grid;grid-template-columns:90px 1fr;gap:6px 10px;margin-bottom:12px}.kv b{color:var(--mut);font-weight:400}
+.chat{background:#f6f7fa;border-radius:8px;padding:12px;max-height:46vh;overflow:auto}
+.msg{margin:8px 0;max-width:80%}.msg.r{margin-left:auto}.msg .meta{font-size:11px;color:var(--mut);margin-bottom:2px}.msg.r .meta{text-align:right}
+.msg .b{background:#fff;border-radius:10px;padding:7px 11px;white-space:pre-wrap;word-break:break-word;box-shadow:0 1px 2px #0001;display:inline-block;text-align:left}
+.msg.r .b{background:#dbe7ff}.msg.sys{max-width:100%;text-align:center;color:var(--mut);font-size:12px}
+.msg img{max-width:200px;max-height:200px;display:block;border-radius:6px}
+#toasts{position:fixed;top:16px;right:16px;display:flex;flex-direction:column;gap:8px;z-index:99}
+.toast{background:var(--dark);color:#fff;padding:10px 16px;border-radius:8px;box-shadow:0 4px 14px #0003;max-width:360px;word-break:break-word}.toast.err{background:var(--err)}
+.sec{margin:16px 0 6px;font-weight:600}
+pre.code{background:#0f172a;color:#e2e8f0;padding:12px;border-radius:8px;overflow:auto;font-size:12px;margin:6px 0}
+</style></head><body>
+<div id="app"></div><div id="toasts"></div>
+<script>
+'use strict';
+/* ============ 基础：DOM 构造（所有数据一律走文本节点，杜绝 innerHTML 注入）============ */
+const h=(tag,attrs,...kids)=>{const e=document.createElement(tag);
+  for(const[k,v]of Object.entries(attrs||{})){
+    if(v==null||v===false)continue;
+    if(k==='class')e.className=v;
+    else if(k.startsWith('on'))e[k]=v;
+    else if(['value','checked','disabled','selected','readOnly'].includes(k))e[k]=v;
+    else e.setAttribute(k,v===true?'':v)}
+  for(const c of kids.flat(Infinity)){if(c==null||c===false)continue;e.append(c instanceof Node?c:String(c))}
+  return e};
+// 原生 replaceChildren 会把 false/null/数组转成文字；put 与 h() 一样先过滤、展开
+const put=(el,...kids)=>el.replaceChildren(...kids.flat(Infinity).filter(c=>c!=null&&c!==false));
+const $app=document.getElementById('app');
+const fmt=s=>s?new Date(s).toLocaleString('zh-CN',{hour12:false}):'-';
+const hm=s=>new Date(s).toLocaleTimeString('zh-CN',{hour12:false});
+const stars=n=>h('span',{class:'star'},'★'.repeat(n)+'☆'.repeat(5-n));
+const STATUS={bot:'机器人接待',queued:'排队中',active:'接待中',closed:'已结束',pending:'待投递',done:'已送达',dead:'投递失败',dropped:'已丢弃'};
+const badge=s=>h('span',{class:'badge '+s},STATUS[s]||s);
+const IMG_URL=/^\/files\/[0-9a-f]{32}$/;
+
+function toast(msg,kind){const t=h('div',{class:'toast '+(kind||'')},msg);document.getElementById('toasts').append(t);setTimeout(()=>t.remove(),kind==='err'?6000:3000)}
+async function copy(text){try{await navigator.clipboard.writeText(text);toast('已复制')}catch(e){toast('复制失败，请手动选择','err')}}
+
+function modal(title,content,buttons,onClose){
+  const mask=h('div',{class:'mask'});const close=()=>{mask.remove();if(onClose)onClose()};
+  const btns=(buttons||[{text:'关闭'}]).map(b=>h('button',{class:'btn '+(b.kind||''),onclick:async ev=>{
+    if(b.onclick){const bt=ev.currentTarget;bt.disabled=true;try{if(await b.onclick(close)===false){bt.disabled=false;return}}catch(e){toast(e.message,'err');bt.disabled=false;return}}
+    close()}},b.text));
+  mask.append(h('div',{class:'modal'},h('h3',{},title),content,h('div',{class:'row end'},btns)));
+  mask.onmousedown=e=>{if(e.target===mask)close()};document.body.append(mask);return close}
+const confirmBox=(msg,okText)=>new Promise(res=>modal('请确认',h('div',{},msg),[{text:'取消'},{text:okText||'确定',kind:'danger',onclick:()=>{res(true)}}],()=>res(false)))
+const field=(label,input,hint)=>h('div',{class:'field'},h('label',{},label),input,hint&&h('span',{class:'hint'},hint));
+
+/* ============ 认证与 API ============ */
+const SS={get:()=>JSON.parse(sessionStorage.getItem('adm')||'null'),set:v=>sessionStorage.setItem('adm',JSON.stringify(v)),clear:()=>sessionStorage.removeItem('adm')};
+let AUTH=SS.get(),TENANT=null,CLEANUP=null;
+
+async function api(method,path,body){
+  const r=await fetch(path,{method,headers:{'X-App-Key':AUTH.ak,'X-App-Secret':AUTH.sec,...(body!==undefined?{'Content-Type':'application/json'}:{})},body:body!==undefined?JSON.stringify(body):undefined});
+  if(r.status===401){logout('登录已失效，请重新登录');throw new Error('登录已失效')}
+  if(r.status===204)return null;
+  let j=null;try{j=await r.json()}catch(e){}
+  if(!r.ok)throw Object.assign(new Error((j&&j.error)||('请求失败（'+r.status+'）')),{status:r.status});
+  return j}
+const safe=fn=>async(...a)=>{try{return await fn(...a)}catch(e){if(e.message!=='登录已失效')toast(e.message,'err');return false}};
+
+function logout(msg){SS.clear();AUTH=null;TENANT=null;if(CLEANUP){CLEANUP();CLEANUP=null}showLogin(msg)}
+
+function showLogin(msg){
+  const ak=h('input',{placeholder:'App Key',required:true,autocomplete:'off'}),sec=h('input',{type:'password',placeholder:'App Secret',required:true,autocomplete:'off'});
+  const err=h('div',{class:'err'},msg||'');
+  const form=h('form',{onsubmit:async e=>{e.preventDefault();err.textContent='';
+    try{ // 登录校验不走 api()：401 在这里表示"凭证错误"，而不是"登录已失效"
+      const cred={ak:ak.value.trim(),sec:sec.value.trim()};
+      const r=await fetch('/v1/tenant',{headers:{'X-App-Key':cred.ak,'X-App-Secret':cred.sec}});
+      if(r.status===401){err.textContent='App Key 或 App Secret 不正确';return}
+      if(!r.ok){err.textContent='登录失败（'+r.status+'）';return}
+      AUTH=cred;TENANT=await r.json();SS.set(AUTH);showShell()
+    }catch(x){err.textContent='无法连接服务器：'+x.message}}},
+    h('h1',{},'在线客服 · 管理后台'),h('p',{},'使用租户的 App Key / App Secret 登录。Secret 仅保存在当前标签页，关闭即清除；请勿在不可信的设备上登录。'),
+    ak,sec,err,h('button',{class:'btn primary'},'登录'));
+  $app.replaceChildren(h('div',{id:'login'},form))}
+
+/* ============ 外壳与路由 ============ */
+const PAGES=[
+  ['dashboard','概览','📊',pageDashboard],['sessions','会话','💬',pageSessions],['agents','坐席','🧑‍💼',pageAgents],
+  ['faq','知识库','📚',pageFaq],['words','敏感词','🚫',pageWords],['ratings','评价','⭐',pageRatings],
+  ['webhook','回调','🔔',pageWebhook],['access','接入','🔌',pageAccess]];
+
+function showShell(){
+  const nav=h('nav',{class:'side'},h('div',{class:'brand'},'客服管理后台'),PAGES.map(([k,t,i])=>h('a',{href:'#/'+k,'data-k':k},i+' ',h('span',{},t))));
+  const title=h('h2',{}),content=h('div',{class:'content'});
+  $app.replaceChildren(h('div',{class:'shell'},nav,h('div',{class:'main'},
+    h('div',{class:'top'},title,h('div',{class:'who'},h('span',{},TENANT.name),h('button',{class:'btn sm',onclick:()=>logout()},'退出'))),content)));
+  const route=async()=>{
+    if(CLEANUP){CLEANUP();CLEANUP=null}
+    const k=location.hash.replace(/^#\//,'')||'dashboard';const p=PAGES.find(x=>x[0]===k)||PAGES[0];
+    nav.querySelectorAll('a').forEach(a=>a.classList.toggle('on',a.dataset.k===p[0]));title.textContent=p[1];
+    content.replaceChildren(h('div',{class:'empty'},'加载中…'));
+    const holder=h('div');
+    try{const c=await p[3](holder);content.replaceChildren(holder);CLEANUP=c||null}
+    catch(e){if(e.message!=='登录已失效')content.replaceChildren(h('div',{class:'empty'},'加载失败：'+e.message))}};
+  window.onhashchange=route;route()}
+
+/* ============ 概览 ============ */
+async function pageDashboard(root){
+  const cards=h('div',{class:'cards'}),agents=h('div',{class:'panel'}),queue=h('div',{class:'panel'});
+  root.append(cards,h('div',{class:'two'},agents,queue));
+  const card=(l,v,s,cls)=>h('div',{class:'card '+(cls||'')},h('div',{class:'l'},l),h('div',{class:'v'},v),h('div',{class:'s'},s||' '));
+  async function load(){
+    const d=new Date();d.setHours(0,0,0,0);
+    const [ov,ro,q]=await Promise.all([api('GET','/v1/stats/overview?since='+encodeURIComponent(d.toISOString())),api('GET','/v1/agents/roster'),api('GET','/v1/sessions?status=queued&limit=20')]);
+    const r=ov.rating;
+    cards.replaceChildren(
+      card('排队中',ov.live.queued,ov.live.queued?'访客正在等待人工':'没有人在排队',ov.live.queued?'warn':''),
+      card('人工接待中',ov.live.active,'进行中的人工会话'),
+      card('机器人接待中',ov.live.bot,'尚未转人工'),
+      card('在线坐席',ov.agents.online+' / '+ov.agents.total,ov.agents.online?'':'当前没有在线坐席',ov.agents.online?'':'bad'),
+      card('今日会话',ov.sessions.total,'其中人工接待 '+ov.sessions.human),
+      card('今日消息',ov.messages,'访客与坐席发送'),
+      card('今日满意度',r.count?r.avg.toFixed(2)+' 分':'-',r.count?r.count+' 条评价 · 满意率 '+Math.round(r.satisfaction_rate*100)+'%':'今日暂无评价',r.count&&r.avg>=4?'good':''));
+    agents.replaceChildren(h('h3',{},'坐席负载'),ro.length?h('div',{class:'tablewrap'},h('table',{},h('thead',{},h('tr',{},['坐席','技能组','状态','接待'].map(x=>h('th',{},x)))),
+      h('tbody',{},ro.map(a=>h('tr',{},h('td',{},a.name||a.accid,h('div',{class:'mut mono'},a.accid)),h('td',{},a.skill_group||'-'),
+        h('td',{},h('span',{class:'dot '+(a.online?'on':'')}),a.online?'在线':'离线'),
+        h('td',{},h('div',{class:'bar '+(a.load>=a.max_load?'full':'')},h('i',{style:'width:'+Math.min(100,a.load/a.max_load*100)+'%'})),h('span',{class:'mut'},a.load+' / '+a.max_load))))))):h('div',{class:'empty'},'还没有坐席，去“坐席”页添加'));
+    queue.replaceChildren(h('h3',{},'排队中的会话'),q.length?h('div',{class:'tablewrap'},h('table',{},h('thead',{},h('tr',{},['会话','访客','技能组','创建时间'].map(x=>h('th',{},x)))),
+      h('tbody',{},q.map(s=>h('tr',{class:'click',onclick:()=>openSession(s.id)},h('td',{},'#'+s.id),h('td',{class:'mono'},s.visitor_accid),h('td',{},s.skill_group||'-'),h('td',{},fmt(s.created_at))))))):h('div',{class:'empty'},'当前没有排队'))}
+  await load();const t=setInterval(()=>load().catch(()=>{}),5000);return()=>clearInterval(t)}
+
+/* ============ 会话 ============ */
+async function pageSessions(root){
+  const roster=await api('GET','/v1/agents/roster');
+  let rows=[],more=false;
+  const status=h('select',{},[['','全部状态'],['bot','机器人接待'],['queued','排队中'],['active','接待中'],['closed','已结束']].map(([v,t])=>h('option',{value:v},t)));
+  const agent=h('select',{},h('option',{value:''},'全部坐席'),roster.map(a=>h('option',{value:a.accid},a.name||a.accid)));
+  const visitor=h('input',{placeholder:'访客账号（精确）'});
+  const tbody=h('tbody'),moreBtn=h('button',{class:'btn',onclick:()=>load(false)},'加载更多');
+  async function load(reset){
+    if(reset){rows=[]}
+    const p=new URLSearchParams({limit:30});if(status.value)p.set('status',status.value);if(agent.value)p.set('agent',agent.value);if(visitor.value.trim())p.set('visitor',visitor.value.trim());
+    if(rows.length)p.set('before',rows[rows.length-1].id);
+    const list=await api('GET','/v1/sessions?'+p);rows.push(...list);more=list.length===30;draw()}
+  function draw(){
+    tbody.replaceChildren(...(rows.length?rows.map(s=>h('tr',{class:'click',onclick:()=>openSession(s.id)},h('td',{},'#'+s.id),h('td',{class:'mono'},s.visitor_accid),h('td',{},s.agent_accid||h('span',{class:'mut'},'—')),
+      h('td',{},badge(s.status)),h('td',{style:'max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'},s.last_msg||''),h('td',{class:'mut'},fmt(s.last_msg_at||s.created_at)))):[h('tr',{},h('td',{colspan:6,class:'empty'},'没有符合条件的会话'))]));
+    moreBtn.hidden=!more}
+  const q=h('button',{class:'btn primary',onclick:safe(()=>load(true))},'查询');
+  visitor.onkeydown=e=>{if(e.key==='Enter')q.click()};
+  root.append(h('div',{class:'panel'},h('div',{class:'row',style:'margin-bottom:12px'},status,agent,visitor,q),
+    h('div',{class:'tablewrap'},h('table',{},h('thead',{},h('tr',{},['会话','访客','坐席','状态','最后一条消息','最后活动'].map(x=>h('th',{},x)))),tbody)),
+    h('div',{class:'row',style:'justify-content:center;margin-top:12px'},moreBtn)));
+  await load(true)}
+
+/* ---- 会话详情抽屉：聊天记录、转接、结束、评价、转接历史 ---- */
+function msgNode(m){
+  if(m.from_role==='system'){return h('div',{class:'msg sys'},(m.from==='business'?'【通知】':'')+hm(m.created_at)+'  '+(m.type==='image'?'[图片]':m.body))}
+  const right=m.from_role!=='visitor';
+  const who={visitor:'访客',agent:'坐席 '+m.from,bot:'机器人'}[m.from_role]||m.from;
+  let content;
+  if(m.type==='image'){let i=null;try{i=JSON.parse(m.body)}catch(e){}
+    content=i&&IMG_URL.test(i.url||'')?h('a',{href:i.url,target:'_blank',rel:'noopener'},h('img',{src:i.url,alt:'图片',loading:'lazy'})):'[图片]'}
+  else content=m.body;
+  return h('div',{class:'msg '+(right?'r':'')},h('div',{class:'meta'},who+' · '+hm(m.created_at)),h('div',{class:'b'},content))}
+
+async function openSession(id){
+  let sess=await api('GET','/v1/sessions/'+id),seq=0,timer=null,extrasFor='',sig='';
+  const info=h('div'),actions=h('div',{class:'row',style:'margin-bottom:12px'}),extras=h('div'),chat=h('div',{class:'chat'});
+  const close=()=>{clearInterval(timer);mask.remove()};
+  const mask=h('div',{class:'drawer-mask',onmousedown:e=>{if(e.target===mask)close()}},
+    h('div',{class:'drawer'},h('header',{},h('b',{},'会话 #'+id),h('button',{class:'btn sm',onclick:close},'关闭')),h('div',{class:'body'},info,actions,extras,h('div',{class:'sec'},'聊天记录'),chat)));
+  document.body.append(mask);
+  function drawInfo(){
+    const k=[sess.status,sess.agent_accid,sess.skill_group,sess.closed_at].join('|');if(k===sig)return;sig=k; // 状态没变就不重绘，避免轮询时按钮被替换而吞掉点击
+    info.replaceChildren(h('div',{class:'kv'},h('b',{},'状态'),h('span',{},badge(sess.status)),h('b',{},'访客'),h('span',{class:'mono'},sess.visitor_accid),
+      h('b',{},'接待坐席'),h('span',{},sess.agent_accid||'—'),h('b',{},'技能组'),h('span',{},sess.skill_group||'—'),h('b',{},'开始'),h('span',{},fmt(sess.created_at)),
+      sess.closed_at&&[h('b',{},'结束'),h('span',{},fmt(sess.closed_at))]));
+    put(actions,sess.status==='active'&&h('button',{class:'btn',onclick:()=>transferDialog()},'转接'),
+      sess.status!=='closed'&&h('button',{class:'btn danger',onclick:async()=>{if(await confirmBox('确定强制结束这个会话吗？访客和坐席都会收到通知。','强制结束')){await safe(()=>api('POST','/v1/sessions/'+id+'/close'))();await refresh()}}},'强制结束'))}
+  async function loadExtras(){
+    const [rt,tr]=await Promise.all([api('GET','/v1/sessions/'+id+'/rating').catch(e=>e.status===404?null:Promise.reject(e)),api('GET','/v1/sessions/'+id+'/transfers')]);
+    put(extras,
+      rt&&[h('div',{class:'sec'},'访客评价'),h('div',{},stars(rt.score),'  ',rt.comment||h('span',{class:'mut'},'（无评语）'))],
+      tr.length?[h('div',{class:'sec'},'转接记录'),...tr.map(t=>h('div',{class:'mut'},fmt(t.created_at)+'  '+t.from_agent+' → '+(t.to_agent||('队列'+(t.skill_group?'（技能组 '+t.skill_group+'）':'')))+(t.note?'　备注：'+t.note:'')))]:null)}
+  async function refresh(){
+    sess=await api('GET','/v1/sessions/'+id);drawInfo();
+    const atBottom=chat.scrollHeight-chat.scrollTop-chat.clientHeight<40;
+    let list;do{list=await api('GET','/v1/sessions/'+id+'/messages?since='+seq);list.forEach(m=>chat.append(msgNode(m)));if(list.length)seq=list[list.length-1].seq}while(list.length>=500);
+    if(atBottom||seq<=0)chat.scrollTop=chat.scrollHeight;
+    if(extrasFor!==sess.status+'|'+sess.agent_accid){extrasFor=sess.status+'|'+sess.agent_accid;await loadExtras()} // 评价/转接记录只在状态或接待人变化时重新加载
+    if(sess.status==='closed')clearInterval(timer)}
+  async function transferDialog(){
+    const ro=await api('GET','/v1/agents/roster');const sel=h('select',{style:'width:100%'}),note=h('textarea',{maxlength:500,rows:3,placeholder:'备注（选填，仅接手坐席可见）'});
+    const groups=new Set();
+    ro.filter(a=>a.accid!==sess.agent_accid).forEach(a=>{if(a.skill_group)groups.add(a.skill_group);
+      sel.append(h('option',{value:'a:'+a.accid,disabled:!a.online||a.load>=a.max_load},(a.name||a.accid)+(a.skill_group?' ['+a.skill_group+']':'')+'  '+(a.online?'在线':'离线')+' '+a.load+'/'+a.max_load))});
+    groups.forEach(g=>sel.append(h('option',{value:'g:'+g},'转到技能组：'+g)));sel.append(h('option',{value:'q:'},'退回队列（交给其他坐席）'));
+    const first=[...sel.options].find(o=>!o.disabled);if(first)sel.value=first.value;
+    modal('转接会话 #'+id,h('div',{},field('转给',sel,'灰色项：对方离线或已满载，不能直接转。'),field('备注',note)),[{text:'取消'},{text:'确认转接',kind:'primary',onclick:async()=>{
+      const v=sel.value,body={note:note.value};if(v.startsWith('a:'))body.to_agent=v.slice(2);else if(v.startsWith('g:'))body.skill_group=v.slice(2);
+      await api('POST','/v1/sessions/'+id+'/transfer',body);toast('已转接');await refresh()}}])}
+  drawInfo();await refresh();
+  timer=setInterval(()=>refresh().catch(()=>{}),3000)}
+
+/* ============ 坐席 ============ */
+async function pageAgents(root){
+  const panel=h('div',{class:'panel'});root.append(panel);
+  const loginUrl=location.origin+'/agent.html';
+  function showCreds(accid,token,why){
+    modal(why,h('div',{},h('p',{},'请立即把这些信息交给坐席本人保管。令牌之后不会再显示，忘记了可以用“重置令牌”重新生成。'),
+      field('登录页',h('div',{class:'mono'},loginUrl)),field('App Key',h('div',{class:'mono'},TENANT.app_key)),field('账号（accid）',h('div',{class:'mono'},accid)),field('令牌（token）',h('div',{class:'mono'},token)),
+      h('button',{class:'btn',onclick:()=>copy(`登录页：${loginUrl}\nApp Key：${TENANT.app_key}\n账号：${accid}\n令牌：${token}`)},'复制全部')),[{text:'我已保存',kind:'primary'}])}
+  function editDialog(a){
+    const edit=!!a;
+    const accid=h('input',{value:a?a.accid:'',disabled:edit,placeholder:'如 agent01（字母数字 _ . @ -，最长 64）'}),name=h('input',{value:a?a.name:'',placeholder:'显示名称，如 小王'});
+    const group=h('input',{value:a?a.skill_group:'',placeholder:'选填，如 售后'}),max=h('input',{type:'number',min:1,max:1000,value:a?a.max_load:5});
+    modal(edit?'编辑坐席':'新增坐席',h('div',{},field('账号',accid,edit?'账号不可修改':''),field('名称',name),field('技能组',group,'转人工时可按技能组分配'),field('同时接待上限',max,'达到上限后不再分配新会话')),
+      [{text:'取消'},{text:'保存',kind:'primary',onclick:async()=>{
+        if(!/^[A-Za-z0-9_.@-]{1,64}$/.test(accid.value.trim()))throw new Error('账号只能包含字母、数字和 _ . @ -，最长 64 位');
+        const r=await api('POST','/v1/accounts',{accid:accid.value.trim(),name:name.value.trim(),role:'agent',skill_group:group.value.trim(),max_load:+max.value||5});
+        toast('已保存');await load();if(!edit)showCreds(r.accid,r.token,'坐席已创建')}}])}
+  async function load(){
+    const ro=await api('GET','/v1/agents/roster');
+    panel.replaceChildren(h('h3',{},'坐席管理',h('span',{class:'row'},h('button',{class:'btn',onclick:safe(load)},'刷新'),h('button',{class:'btn primary',onclick:()=>editDialog()},'+ 新增坐席'))),
+      ro.length?h('div',{class:'tablewrap'},h('table',{},h('thead',{},h('tr',{},['账号','名称','技能组','状态','接待','操作'].map(x=>h('th',{},x)))),
+        h('tbody',{},ro.map(a=>h('tr',{},h('td',{class:'mono'},a.accid),h('td',{},a.name||'-'),h('td',{},a.skill_group||'-'),h('td',{},h('span',{class:'dot '+(a.online?'on':'')}),a.online?'在线':'离线'),
+          h('td',{},a.load+' / '+a.max_load),h('td',{},h('div',{class:'row'},h('button',{class:'btn sm',onclick:()=>editDialog(a)},'编辑'),
+            h('button',{class:'btn sm danger',onclick:async()=>{if(await confirmBox('重置后旧令牌立即失效，该坐席当前的连接会被断开，需要用新令牌重新登录。',  '重置令牌')){const r=await safe(()=>api('POST','/v1/accounts/'+encodeURIComponent(a.accid)+'/token'))();if(r)showCreds(r.accid,r.token,'令牌已重置')}}},'重置令牌'))))))))
+      :h('div',{class:'empty'},'还没有坐席，点右上角“新增坐席”'))}
+  await load();const t=setInterval(()=>load().catch(()=>{}),8000);return()=>clearInterval(t)}
+
+/* ============ 知识库 ============ */
+async function pageFaq(root){
+  const panel=h('div',{class:'panel'}),search=h('input',{placeholder:'搜索问题/答案/关键词'});root.append(panel);let list=[];
+  function editDialog(f){
+    const q=h('input',{value:f?f.question:'',placeholder:'用户可能怎么问，如：如何申请退款'}),a=h('textarea',{rows:5,maxlength:2000,placeholder:'机器人的回答'},f?f.answer:''),k=h('input',{value:f?f.keywords:'',placeholder:'选填，用逗号分隔，如：退款,退钱'});
+    a.value=f?f.answer:'';
+    modal(f?'编辑问答':'新增问答',h('div',{},field('问题',q),field('答案',a),field('关键词',k,'命中关键词会提高匹配得分')),[{text:'取消'},{text:'保存',kind:'primary',onclick:async()=>{
+      const body={question:q.value.trim(),answer:a.value.trim(),keywords:k.value.trim()};if(!body.question||!body.answer)throw new Error('问题和答案都要填写');
+      if(f)await api('PUT','/v1/faqs/'+f.id,body);else await api('POST','/v1/faqs',body);toast('已保存');await load()}}])}
+  function draw(){
+    const kw=search.value.trim().toLowerCase();const rows=list.filter(f=>!kw||(f.question+f.answer+f.keywords).toLowerCase().includes(kw));
+    panel.replaceChildren(h('h3',{},'知识库（机器人回答依据）  ',h('span',{class:'row'},search,h('button',{class:'btn primary',onclick:()=>editDialog()},'+ 新增'))),
+      rows.length?h('div',{class:'tablewrap'},h('table',{},h('thead',{},h('tr',{},['问题','答案','关键词','操作'].map(x=>h('th',{},x)))),h('tbody',{},rows.map(f=>h('tr',{},
+        h('td',{style:'min-width:160px'},f.question),h('td',{style:'min-width:220px;white-space:pre-wrap'},f.answer.length>120?f.answer.slice(0,120)+'…':f.answer),h('td',{class:'mut'},f.keywords||'-'),
+        h('td',{},h('div',{class:'row'},h('button',{class:'btn sm',onclick:()=>editDialog(f)},'编辑'),h('button',{class:'btn sm danger',onclick:async()=>{if(await confirmBox('确定删除这条问答吗？','删除')){await safe(()=>api('DELETE','/v1/faqs/'+f.id))();await load()}}},'删除')))))))):h('div',{class:'empty'},list.length?'没有匹配的问答':'知识库还是空的，机器人暂时无法回答任何问题'))
+    search.oninput=()=>{const pos=search.selectionStart;draw();search.focus();search.setSelectionRange(pos,pos)}}
+  async function load(){list=await api('GET','/v1/faqs');draw()}
+  await load()}
+
+/* ============ 敏感词 ============ */
+async function pageWords(root){
+  const panel=h('div',{class:'panel'}),addBox=h('div',{class:'panel'});root.append(addBox,panel);
+  const ta=h('textarea',{rows:4,placeholder:'每行一个词，也可用逗号分隔。至少 2 个字符，最多 128 字节。'}),act=h('select',{},h('option',{value:'mask'},'屏蔽：替换为 ***，消息照常发送'),h('option',{value:'block'},'拒绝：整条消息不发送'));
+  addBox.append(h('h3',{},'添加敏感词'),ta,h('div',{class:'row',style:'margin-top:10px'},act,h('button',{class:'btn primary',onclick:safe(async()=>{
+    const words=[...new Set(ta.value.split(/[\n,，]/).map(s=>s.trim()).filter(Boolean))];if(!words.length)throw new Error('请输入至少一个词');
+    const r=await api('POST','/v1/sensitive-words',{words,action:act.value});ta.value='';toast('已添加/更新 '+r.affected+' 个词');await load()})},'添加')),
+    h('p',{class:'mut',style:'margin-bottom:0'},'仅过滤访客与坐席发送的文本消息。已存在的词会更新处理方式。匹配时忽略大小写、全角半角及词中夹杂的空格/标点。'));
+  async function load(){const list=await api('GET','/v1/sensitive-words');
+    panel.replaceChildren(h('h3',{},'敏感词库（'+list.length+' / 5000）'),list.length?h('div',{class:'row'},list.map(w=>h('span',{class:'badge '+(w.action==='block'?'dead':'pending'),style:'padding:3px 4px 3px 10px'},w.word+' · '+(w.action==='block'?'拒绝':'屏蔽')+' ',
+      h('button',{class:'btn sm',style:'margin-left:4px;padding:0 6px',title:'删除',onclick:safe(async()=>{await api('DELETE','/v1/sensitive-words/'+w.id);await load()})},'×')))):h('div',{class:'empty'},'还没有敏感词'))}
+  await load()}
+
+/* ============ 评价 ============ */
+async function pageRatings(root){
+  const period=h('select',{},[['0','今天'],['7','近 7 天'],['30','近 30 天'],['all','全部']].map(([v,t])=>h('option',{value:v},t)));period.value='7';
+  const top=h('div'),listPanel=h('div',{class:'panel'});
+  const kind=h('select',{},[['','全部评分'],['good','好评（4-5）'],['mid','中评（3）'],['bad','差评（1-2）']].map(([v,t])=>h('option',{value:v},t)));
+  const ro=await api('GET','/v1/agents/roster');const agent=h('select',{},h('option',{value:''},'全部坐席'),ro.map(a=>h('option',{value:a.accid},a.name||a.accid)));
+  const tbody=h('tbody'),moreBtn=h('button',{class:'btn',onclick:safe(()=>loadList(false))},'加载更多');let rows=[];
+  root.append(h('div',{class:'row',style:'margin-bottom:14px'},h('span',{},'统计区间'),period),top,listPanel);
+  async function loadStats(){
+    let from;if(period.value==='all')from='2000-01-01';else{const d=new Date();d.setHours(0,0,0,0);d.setDate(d.getDate()-(+period.value));from=d.toISOString()}
+    const s=await api('GET','/v1/stats/ratings?from='+encodeURIComponent(from));
+    const max=Math.max(1,...Object.values(s.distribution));
+    top.replaceChildren(h('div',{class:'cards'},
+      h('div',{class:'card'},h('div',{class:'l'},'评价数'),h('div',{class:'v'},s.count)),
+      h('div',{class:'card '+(s.count&&s.avg>=4?'good':'')},h('div',{class:'l'},'平均分'),h('div',{class:'v'},s.count?s.avg.toFixed(2):'-'),h('div',{class:'s'},'满分 5')),
+      h('div',{class:'card '+(s.count&&s.satisfaction_rate<0.6?'bad':'good')},h('div',{class:'l'},'满意率'),h('div',{class:'v'},s.count?Math.round(s.satisfaction_rate*100)+'%':'-'),h('div',{class:'s'},'4~5 分占比'))),
+      h('div',{class:'two'},h('div',{class:'panel'},h('h3',{},'评分分布'),[5,4,3,2,1].map(n=>h('div',{class:'dist'},h('span',{},n+' 分'),h('div',{class:'bar'},h('i',{style:'width:'+(s.distribution[n]/max*100)+'%'})),h('span',{class:'mut'},s.distribution[n])))),
+        h('div',{class:'panel'},h('h3',{},'各坐席'),s.by_agent.length?h('table',{},h('thead',{},h('tr',{},['坐席','评价数','平均分'].map(x=>h('th',{},x)))),h('tbody',{},s.by_agent.map(a=>h('tr',{},h('td',{},a.agent_accid||h('span',{class:'mut'},'机器人')),h('td',{},a.count),h('td',{},a.avg.toFixed(2)))))):h('div',{class:'empty'},'暂无数据'))))}
+  async function loadList(reset){
+    if(reset)rows=[];const p=new URLSearchParams({limit:30});if(agent.value)p.set('agent',agent.value);
+    if(kind.value==='good')p.set('min_score',4);if(kind.value==='mid'){p.set('min_score',3);p.set('max_score',3)}if(kind.value==='bad')p.set('max_score',2);
+    if(rows.length)p.set('before',rows[rows.length-1].session_id);
+    const l=await api('GET','/v1/ratings?'+p);rows.push(...l);moreBtn.hidden=l.length<30;
+    tbody.replaceChildren(...(rows.length?rows.map(r=>h('tr',{class:'click',onclick:()=>openSession(r.session_id)},h('td',{},'#'+r.session_id),h('td',{},stars(r.score)),h('td',{style:'white-space:pre-wrap'},r.comment||h('span',{class:'mut'},'—')),
+      h('td',{},r.agent_accid||h('span',{class:'mut'},'机器人')),h('td',{class:'mut'},fmt(r.created_at)))):[h('tr',{},h('td',{colspan:5,class:'empty'},'暂无评价'))]))}
+  listPanel.append(h('h3',{},'最近评价',h('span',{class:'row'},kind,agent)),h('div',{class:'tablewrap'},h('table',{},h('thead',{},h('tr',{},['会话','评分','评语','坐席','时间'].map(x=>h('th',{},x)))),tbody)),h('div',{class:'row',style:'justify-content:center;margin-top:12px'},moreBtn));
+  period.onchange=safe(loadStats);kind.onchange=agent.onchange=safe(()=>loadList(true));
+  await Promise.all([loadStats(),loadList(true)])}
+
+/* ============ 回调 ============ */
+async function pageWebhook(root){
+  const cfg=h('div',{class:'panel'}),evp=h('div',{class:'panel'});root.append(cfg,evp);let secretShown=false;
+  async function loadCfg(){
+    const w=await api('GET','/v1/webhook');const url=h('input',{value:w.url||'',placeholder:'https://your-server.example.com/kefu-callback',style:'width:100%'});
+    const sec=h('span',{class:'mono'},w.secret?(secretShown?w.secret:'•'.repeat(24)):'—');
+    put(cfg,h('h3',{},'消息回调（抄送）'),field('回调地址',url,'留空并保存＝停用。只允许 http(s)，且不能指向内网地址。'),
+      h('div',{class:'row'},h('button',{class:'btn primary',onclick:safe(async()=>{const u=url.value.trim();if(!u){await api('DELETE','/v1/webhook');toast('回调已停用')}else{await api('PUT','/v1/webhook',{url:u});toast('已保存')}await loadCfg()})},'保存'),
+        w.url&&h('button',{class:'btn danger',onclick:safe(async()=>{if(await confirmBox('停用后将不再推送任何事件。','停用')){await api('DELETE','/v1/webhook');await loadCfg()}})},'停用')),
+      w.secret&&[h('div',{class:'sec'},'签名密钥'),h('div',{class:'row'},sec,h('button',{class:'btn sm',onclick:()=>{secretShown=!secretShown;loadCfg()}},secretShown?'隐藏':'显示'),h('button',{class:'btn sm',onclick:()=>copy(w.secret)},'复制'),
+        h('button',{class:'btn sm danger',onclick:safe(async()=>{if(await confirmBox('轮换后旧密钥立即失效，请同步更新你的服务器，否则会校验失败。','轮换')){await api('PUT','/v1/webhook',{url:w.url,rotate_secret:true});secretShown=true;await loadCfg()}})},'轮换')),
+        h('pre',{class:'code'},'X-Kefu-Signature = "sha256=" + hex(HMAC_SHA256(secret, X-Kefu-Timestamp + "." + 请求体原文))\n事件按 event_id 去重；2xx 视为成功，否则按 10s/30s/2m/10m/30m/1h/3h 退避重试，共 8 次。')])}
+  let rows=[],status='';
+  const tbody=h('tbody'),moreBtn=h('button',{class:'btn',onclick:safe(()=>loadEv(false))},'加载更多');
+  const sel=h('select',{onchange:safe(()=>{status=sel.value;return loadEv(true)})},[['','全部状态'],['pending','待投递'],['done','已送达'],['dead','投递失败'],['dropped','已丢弃']].map(([v,t])=>h('option',{value:v},t)));
+  async function loadEv(reset){
+    if(reset)rows=[];const p=new URLSearchParams({limit:30});if(status)p.set('status',status);if(rows.length)p.set('before',rows[rows.length-1].id);
+    const l=await api('GET','/v1/webhook/events?'+p);rows.push(...l);moreBtn.hidden=l.length<30;
+    tbody.replaceChildren(...(rows.length?rows.map(e=>h('tr',{},h('td',{class:'mono'},e.id),h('td',{},e.type),h('td',{},badge(e.status)),h('td',{},e.attempts),h('td',{class:'mut',style:'max-width:240px;word-break:break-all'},e.last_error||'—'),h('td',{class:'mut'},fmt(e.created_at)),
+      h('td',{},e.status==='dead'&&h('button',{class:'btn sm',onclick:safe(async()=>{await api('POST','/v1/webhook/events/'+e.id+'/retry');toast('已重新加入投递队列');await loadEv(true)})},'重试')))):[h('tr',{},h('td',{colspan:7,class:'empty'},'暂无投递记录'))]))}
+  evp.append(h('h3',{},'投递记录',h('span',{class:'row'},sel,h('button',{class:'btn',onclick:safe(()=>loadEv(true))},'刷新'))),
+    h('div',{class:'tablewrap'},h('table',{},h('thead',{},h('tr',{},['事件 ID','类型','状态','尝试','最近错误','时间',''].map(x=>h('th',{},x)))),tbody)),h('div',{class:'row',style:'justify-content:center;margin-top:12px'},moreBtn));
+  await Promise.all([loadCfg(),loadEv(true)])}
+
+/* ============ 接入 ============ */
+async function pageAccess(root){
+  const origin=location.origin,visitor=`${origin}/visitor.html?appkey=${TENANT.app_key}`;
+  const row=(l,v)=>h('div',{class:'field'},h('label',{},l),h('div',{class:'row'},h('span',{class:'mono'},v),h('button',{class:'btn sm',onclick:()=>copy(v)},'复制')));
+  root.append(h('div',{class:'panel'},h('h3',{},'接入信息'),row('App Key',TENANT.app_key),
+      h('div',{class:'field'},h('label',{},'App Secret'),h('span',{class:'mut'},'仅用于你们的服务器调用接口，不要放进网页或 App 客户端。')),
+      row('访客聊天页',visitor),row('坐席工作台',origin+'/agent.html'),row('管理后台',origin+'/admin.html')),
+    h('div',{class:'panel'},h('h3',{},'嵌入网站'),h('p',{class:'mut'},'把下面的代码放进你的网页即可出现客服入口（iframe 方式）：'),
+      h('pre',{class:'code'},`<iframe src="${visitor}"\n        style="position:fixed;right:20px;bottom:20px;width:380px;height:560px;border:0;border-radius:12px;box-shadow:0 8px 30px #0003"></iframe>`),
+      h('button',{class:'btn',onclick:()=>copy(`<iframe src="${visitor}" style="position:fixed;right:20px;bottom:20px;width:380px;height:560px;border:0;border-radius:12px;box-shadow:0 8px 30px #0003"></iframe>`)},'复制代码')),
+    h('div',{class:'panel'},h('h3',{},'服务端接口'),h('p',{class:'mut'},'所有接口都以 X-App-Key / X-App-Secret 认证，例如：'),
+      h('pre',{class:'code'},`curl ${origin}/v1/agents/roster \\\n  -H "X-App-Key: ${TENANT.app_key}" -H "X-App-Secret: <你的 Secret>"`),
+      h('p',{class:'mut',style:'margin-bottom:0'},'完整的接口、WebSocket 协议与回调事件见项目 README。')))}
+
+/* ============ 启动 ============ */
+if(AUTH){api('GET','/v1/tenant').then(t=>{TENANT=t;showShell()}).catch(()=>showLogin())}else showLogin();
+</script></body></html>

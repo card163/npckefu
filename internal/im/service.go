@@ -335,6 +335,19 @@ func (s *Service) Close(ctx context.Context, acc *store.Account, sessionID int64
 	if sess.VisitorAccid != acc.Accid && sess.AgentAccid != acc.Accid {
 		return ErrForbidden
 	}
+	return s.closeSession(ctx, sess)
+}
+
+// CloseByTenant 租户服务端/管理后台强制结束会话。
+func (s *Service) CloseByTenant(ctx context.Context, tenantID, sessionID int64) error {
+	sess, err := s.St.Session(ctx, tenantID, sessionID)
+	if err != nil {
+		return err
+	}
+	return s.closeSession(ctx, sess)
+}
+
+func (s *Service) closeSession(ctx context.Context, sess *store.Session) error {
 	if sess.Status == store.StatusClosed {
 		return nil
 	}

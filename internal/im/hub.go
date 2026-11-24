@@ -145,7 +145,8 @@ func (h *Hub) pushLocal(t int64, accid string, b []byte) {
 type remoteEnvelope struct {
 	T int64           `json:"t"`
 	A string          `json:"a"`
-	E json.RawMessage `json:"e"`
+	E json.RawMessage `json:"e,omitempty"`
+	K string          `json:"k,omitempty"` // 控制指令：kick
 }
 
 // Push 向账号的所有在线端推送（含其他节点上的连接）；离线则靠 Sync 补拉。
@@ -178,9 +179,14 @@ func (h *Hub) Push(t int64, accid string, ev Event) {
 
 func (h *Hub) onRemote(payload []byte) {
 	var e remoteEnvelope
-	if json.Unmarshal(payload, &e) == nil {
-		h.pushLocal(e.T, e.A, e.E)
+	if json.Unmarshal(payload, &e) != nil {
+		return
 	}
+	if e.K == "kick" {
+		h.kickLocal(e.T, e.A)
+		return
+	}
+	h.pushLocal(e.T, e.A, e.E)
 }
 
 func (h *Hub) snapshot() []cluster.ConnRef {
@@ -197,6 +203,41 @@ func (h *Hub) snapshot() []cluster.ConnRef {
 
 // Run 运行集群后台任务（订阅跨节点消息、连接心跳），阻塞到 ctx 结束。
 func (h *Hub) Run(ctx context.Context) { h.cl.Run(ctx, h.snapshot, h.onRemote) }
+
+// Kick 断开账号在所有节点上的连接（如令牌被重置后，旧凭证的连接必须立即失效）。
+func (h *Hub) Kick(t int64, accid string) {
+	h.kickLocal(t, accid)
+	ctx, cancel := opCtx()
+	defer cancel()
+	members, err := h.cl.Members(ctx, t, accid)
+	if err != nil {
+		log.Printf("cluster members: %v", err)
+		return
+	}
+	self, sent := h.cl.NodeID(), map[string]bool{}
+	env, _ := json.Marshal(remoteEnvelope{T: t, A: accid, K: "kick"})
+	for _, m := range members {
+		if n := cluster.NodeOf(m); n != self && !sent[n] {
+			sent[n] = true
+			if err := h.cl.Publish(ctx, n, env); err != nil {
+				log.Printf("cluster publish kick to %s: %v", n, err)
+			}
+		}
+	}
+}
+
+func (h *Hub) kickLocal(t int64, accid string) {
+	h.mu.RLock()
+	var conns []*Conn
+	for c := range h.conns[key(t, accid)] {
+		conns = append(conns, c)
+	}
+	h.mu.RUnlock()
+	for _, c := range conns {
+		_ = c.ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "credentials changed"), time.Now().Add(time.Second))
+		_ = c.ws.Close()
+	}
+}
 
 // CloseAll 关闭本进程所有连接（优雅停机）：客户端会自动重连到其他节点。
 func (h *Hub) CloseAll() {
