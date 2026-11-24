@@ -142,14 +142,14 @@ func TestWebhookNoticeRecent(t *testing.T) {
 		mu.Lock()
 		n := len(got)
 		mu.Unlock()
-		if n >= 2 || time.Now().After(deadline) {
+		if n >= 3 || time.Now().After(deadline) { // session.created + message.created + presence.changed
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if calls < 3 || len(got) < 2 {
+	if calls < 4 || len(got) < 3 {
 		t.Fatalf("calls=%d got=%d", calls, len(got))
 	}
 	types := map[string]bool{}

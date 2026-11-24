@@ -45,24 +45,37 @@ func NewHub() *Hub { return &Hub{conns: map[string]map[*Conn]struct{}{}} }
 
 func key(t int64, accid string) string { return fmt.Sprintf("%d/%s", t, accid) }
 
-func (h *Hub) add(c *Conn) {
+// add 注册连接，返回是否为该账号的第一个连接。
+func (h *Hub) add(c *Conn) (first bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	k := key(c.acc.TenantID, c.acc.Accid)
 	if h.conns[k] == nil {
 		h.conns[k] = map[*Conn]struct{}{}
 	}
+	first = len(h.conns[k]) == 0
 	h.conns[k][c] = struct{}{}
+	return first
 }
 
-func (h *Hub) remove(c *Conn) {
+// remove 注销连接，返回是否已是该账号的最后一个连接。
+func (h *Hub) remove(c *Conn) (last bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	k := key(c.acc.TenantID, c.acc.Accid)
 	delete(h.conns[k], c)
 	if len(h.conns[k]) == 0 {
 		delete(h.conns, k)
+		return true
 	}
+	return false
+}
+
+// Count 返回账号当前在线连接数（多端同时在线）。
+func (h *Hub) Count(t int64, accid string) int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.conns[key(t, accid)])
 }
 
 func (h *Hub) Online(t int64, accid string) bool {
@@ -120,7 +133,9 @@ func (s *Service) ServeWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := &Conn{ws: ws, acc: acc, send: make(chan []byte, 128)}
-	s.Hub.add(c)
+	if s.Hub.add(c) {
+		s.presenceUp(acc)
+	}
 	go c.writeLoop()
 	if acc.Role == store.RoleAgent {
 		go s.Dispatch(context.Background(), acc.TenantID) // 坐席上线，消化排队
@@ -138,7 +153,9 @@ func (s *Service) ServeWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.readLoop(c)
-	s.Hub.remove(c)
+	if s.Hub.remove(c) {
+		s.presenceDown(acc)
+	}
 	close(c.send)
 	ws.Close()
 }

@@ -49,6 +49,8 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/webhook", a.tenantAuth(a.deleteWebhook))
 	mux.HandleFunc("POST /v1/messages", a.tenantAuth(a.sendMessage))
 	mux.HandleFunc("GET /v1/accounts/{accid}/recent", a.tenantAuth(a.recent))
+	mux.HandleFunc("GET /v1/accounts/{accid}/presence", a.tenantAuth(a.presence))
+	mux.HandleFunc("POST /v1/presence", a.tenantAuth(a.presenceBatch))
 	mux.HandleFunc("PUT /v1/accounts/{accid}/devices", a.tenantAuth(a.putDevice))
 	mux.HandleFunc("DELETE /v1/accounts/{accid}/devices/{token}", a.tenantAuth(a.deleteDevice))
 	mux.HandleFunc("POST /v1/sensitive-words", a.tenantAuth(a.addWords))
@@ -135,7 +137,19 @@ func (a *API) upsertAccount(w http.ResponseWriter, r *http.Request, t *store.Ten
 
 func (a *API) listAccounts(w http.ResponseWriter, r *http.Request, t *store.Tenant) {
 	v, err := a.St.ListAccounts(r.Context(), t.ID, r.URL.Query().Get("role"))
-	respond(w, v, err)
+	if err != nil {
+		serverErr(w, err)
+		return
+	}
+	type view struct { // 附带在线状态，方便坐席管理页展示
+		store.Account
+		Online bool `json:"online"`
+	}
+	out := make([]view, 0, len(v))
+	for _, x := range v {
+		out = append(out, view{x, a.IM.Hub.Online(t.ID, x.Accid)})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (a *API) addFAQ(w http.ResponseWriter, r *http.Request, t *store.Tenant) {
@@ -344,6 +358,35 @@ func (a *API) deleteWord(w http.ResponseWriter, r *http.Request, t *store.Tenant
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) presence(w http.ResponseWriter, r *http.Request, t *store.Tenant) {
+	ps, err := a.IM.Presences(r.Context(), t.ID, []string{r.PathValue("accid")})
+	if err != nil {
+		serverErr(w, err)
+		return
+	}
+	if !ps[0].Exists {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, ps[0])
+}
+
+// presenceBatch 批量查询（最多 100 个）：{"accids":["a","b"]}。
+func (a *API) presenceBatch(w http.ResponseWriter, r *http.Request, t *store.Tenant) {
+	var in struct {
+		Accids []string `json:"accids"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	if len(in.Accids) == 0 || len(in.Accids) > 100 {
+		writeErr(w, http.StatusBadRequest, "accids: 1-100 items")
+		return
+	}
+	ps, err := a.IM.Presences(r.Context(), t.ID, in.Accids)
+	respondObj(w, ps, err)
 }
 
 func respondObj(w http.ResponseWriter, v any, err error) {

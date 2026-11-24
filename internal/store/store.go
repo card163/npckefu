@@ -95,6 +95,7 @@ var schema = []string{
   id BIGINT AUTO_INCREMENT PRIMARY KEY, tenant_id BIGINT NOT NULL,
   accid VARCHAR(64) NOT NULL, name VARCHAR(128) NOT NULL DEFAULT '', role VARCHAR(16) NOT NULL,
   token VARCHAR(64) NOT NULL, skill_group VARCHAR(64) NOT NULL DEFAULT '', max_load INT NOT NULL DEFAULT 5,
+  last_seen_at DATETIME(3) NULL,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   UNIQUE KEY uq_tenant_accid(tenant_id, accid)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 	`CREATE TABLE IF NOT EXISTS sessions(
@@ -183,6 +184,7 @@ func Open(dsn string) (*Store, error) {
 		{"tenants", "callback_secret", "VARCHAR(64) NULL"},
 		{"sessions", "last_msg_at", "DATETIME(3) NULL"},
 		{"sessions", "last_msg_body", "VARCHAR(255) NOT NULL DEFAULT ''"},
+		{"accounts", "last_seen_at", "DATETIME(3) NULL"},
 	} {
 		if err := st.ensureColumn(ctx, c[0], c[1], c[2]); err != nil {
 			return nil, fmt.Errorf("migrate: %w", err)

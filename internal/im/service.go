@@ -35,10 +35,14 @@ type Service struct {
 	mu           sync.Mutex // 串行化分配，避免超配坐席
 	pushMu       sync.Mutex
 	pushLast     map[string]time.Time
+	// PresenceGrace 账号最后一个连接断开后，等待多久仍未重连才对外宣告离线（吸收网络抖动/页面刷新），默认 10s。
+	PresenceGrace time.Duration
+	pmu           sync.Mutex
+	announced     map[string]bool // 已对外宣告"在线"的账号
 }
 
 func NewService(st *store.Store, b *bot.Bot) *Service {
-	return &Service{St: st, Hub: NewHub(), Bot: b, Mod: moderation.New(st), PushInterval: 30 * time.Second, pushLast: map[string]time.Time{}}
+	return &Service{St: st, Hub: NewHub(), Bot: b, Mod: moderation.New(st), PushInterval: 30 * time.Second, pushLast: map[string]time.Time{}, PresenceGrace: 10 * time.Second, announced: map[string]bool{}}
 }
 
 type SendReq struct {
@@ -447,4 +451,75 @@ func (s *Service) RegisterDevice(ctx context.Context, acc *store.Account, platfo
 		return ErrBadInput
 	}
 	return s.St.UpsertDevice(ctx, acc.TenantID, acc.Accid, platform, token)
+}
+
+// ---- 在线状态 ----
+
+func presenceKey(a *store.Account) string { return fmt.Sprintf("%d/%s", a.TenantID, a.Accid) }
+
+func (s *Service) emitPresence(a *store.Account, online bool) {
+	s.emit(a.TenantID, "presence.changed", map[string]any{"accid": a.Accid, "role": a.Role, "online": online, "at": time.Now().UnixMilli()})
+}
+
+// presenceUp 账号第一个连接建立。若此前已宣告在线（上次断线仍在宽限期内），则不重复宣告。
+func (s *Service) presenceUp(a *store.Account) {
+	k := presenceKey(a)
+	s.pmu.Lock()
+	already := s.announced[k]
+	s.announced[k] = true
+	s.pmu.Unlock()
+	if !already {
+		s.emitPresence(a, true)
+	}
+}
+
+// presenceDown 账号最后一个连接断开：立即记录最后在线时间，宽限期后仍无连接才宣告离线。
+func (s *Service) presenceDown(a *store.Account) {
+	if err := s.St.TouchLastSeen(context.Background(), a.TenantID, a.Accid); err != nil {
+		log.Printf("last_seen: %v", err)
+	}
+	time.AfterFunc(s.PresenceGrace, func() {
+		k := presenceKey(a)
+		s.pmu.Lock()
+		// 持锁检查：与 presenceUp 配合（连接先入 Hub 再进 presenceUp），不会把已重连的账号误报离线。
+		if s.Hub.Online(a.TenantID, a.Accid) || !s.announced[k] {
+			s.pmu.Unlock()
+			return
+		}
+		delete(s.announced, k)
+		s.pmu.Unlock()
+		s.emitPresence(a, false)
+	})
+}
+
+type Presence struct {
+	Accid       string     `json:"accid"`
+	Exists      bool       `json:"exists"`
+	Role        string     `json:"role,omitempty"`
+	Online      bool       `json:"online"`
+	Connections int        `json:"connections"` // 同时在线的端数
+	LastSeenAt  *time.Time `json:"last_seen_at,omitempty"`
+}
+
+// Presences 批量查询，按输入顺序返回；不存在的账号 exists=false。
+// 注意：在线状态来自本进程的连接表，多实例部署需改为共享存储（见 README）。
+func (s *Service) Presences(ctx context.Context, tenantID int64, accids []string) ([]Presence, error) {
+	rows, err := s.St.PresenceRows(ctx, tenantID, accids)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Presence, 0, len(accids))
+	for _, id := range accids {
+		p := Presence{Accid: id}
+		if r, ok := rows[id]; ok {
+			p.Exists, p.Role = true, r.Role
+			p.Connections = s.Hub.Count(tenantID, id)
+			p.Online = p.Connections > 0
+			if !p.Online { // 在线时不返回 last_seen，避免与"现在"混淆
+				p.LastSeenAt = r.LastSeenAt
+			}
+		}
+		out = append(out, p)
+	}
+	return out, nil
 }

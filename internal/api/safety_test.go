@@ -44,6 +44,7 @@ func newEnv(t *testing.T) *env {
 	e := &env{st: st}
 	e.svc = im.NewService(st, bot.New(st, nil))
 	e.svc.PushInterval = time.Hour
+	e.svc.PresenceGrace = 300 * time.Millisecond
 	a := &api.API{St: st, IM: e.svc, AdminToken: "adm", AllowPrivateWebhook: true}
 	e.srv = httptest.NewServer(a.Handler())
 	t.Cleanup(e.srv.Close)
@@ -241,5 +242,97 @@ func TestOfflinePush(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("ws device registration failed")
+	}
+}
+
+func TestPresence(t *testing.T) {
+	e := newEnv(t)
+	v := e.visitor(t)
+	var agent store.Account
+	do(t, "POST", e.srv.URL+"/v1/accounts", e.h, store.Account{Accid: "ag-presence", Name: "坐席", Role: "agent"}, &agent)
+	get := func(accid string) (im.Presence, int) {
+		var p im.Presence
+		c := do(t, "GET", e.srv.URL+"/v1/accounts/"+accid+"/presence", e.h, nil, &p)
+		return p, c
+	}
+
+	// 从未上线
+	p, c := get(v.Accid)
+	if c != 200 || !p.Exists || p.Online || p.Connections != 0 || p.LastSeenAt != nil || p.Role != "visitor" {
+		t.Fatalf("initial: %d %+v", c, p)
+	}
+	if _, c := get("nobody"); c != 404 {
+		t.Fatalf("unknown should be 404, got %d", c)
+	}
+
+	// 两端同时在线
+	c1 := dial(t, e.srv.URL, e.tenant.AppKey, v)
+	c2 := dial(t, e.srv.URL, e.tenant.AppKey, v)
+	time.Sleep(200 * time.Millisecond)
+	if p, _ = get(v.Accid); !p.Online || p.Connections != 2 || p.LastSeenAt != nil {
+		t.Fatalf("two devices: %+v", p)
+	}
+	// 坐席列表带在线状态
+	ac := dial(t, e.srv.URL, e.tenant.AppKey, agent)
+	time.Sleep(200 * time.Millisecond)
+	var list []map[string]any
+	do(t, "GET", e.srv.URL+"/v1/accounts?role=agent", e.h, nil, &list)
+	if len(list) == 0 || list[0]["online"] != true {
+		t.Fatalf("agent list: %+v", list)
+	}
+
+	// 批量：按输入顺序，未知账号 exists=false；数量校验
+	var batch []im.Presence
+	do(t, "POST", e.srv.URL+"/v1/presence", e.h, map[string]any{"accids": []string{"nobody", v.Accid, agent.Accid}}, &batch)
+	if len(batch) != 3 || batch[0].Exists || !batch[1].Online || !batch[2].Online || batch[2].Role != "agent" {
+		t.Fatalf("batch: %+v", batch)
+	}
+	if c := do(t, "POST", e.srv.URL+"/v1/presence", e.h, map[string]any{"accids": []string{}}, nil); c != 400 {
+		t.Fatalf("empty batch should be 400, got %d", c)
+	}
+
+	// 关掉一端仍在线；全部关掉后离线并有 last_seen
+	c1.Close()
+	time.Sleep(200 * time.Millisecond)
+	if p, _ = get(v.Accid); !p.Online || p.Connections != 1 {
+		t.Fatalf("one left: %+v", p)
+	}
+	c2.Close()
+	time.Sleep(200 * time.Millisecond)
+	if p, _ = get(v.Accid); p.Online || p.Connections != 0 || p.LastSeenAt == nil || time.Since(*p.LastSeenAt) > time.Minute {
+		t.Fatalf("offline: %+v", p)
+	}
+	ac.Close()
+
+	// 事件：visitor 上线 1 次、离线 1 次（宽限期后）
+	count := func(accid string, online bool) int {
+		n := 0
+		for _, ev := range e.eventsOf("presence.changed", 1) {
+			d := ev["data"].(map[string]any)
+			if d["accid"] == accid && d["online"] == online {
+				n++
+			}
+		}
+		return n
+	}
+	time.Sleep(600 * time.Millisecond) // 超过 PresenceGrace
+	if count(v.Accid, true) != 1 || count(v.Accid, false) != 1 {
+		t.Fatalf("events: online=%d offline=%d", count(v.Accid, true), count(v.Accid, false))
+	}
+
+	// 抖动：断线后在宽限期内重连，不应产生离线/上线事件
+	f := e.visitor(t)
+	fc := dial(t, e.srv.URL, e.tenant.AppKey, f)
+	time.Sleep(150 * time.Millisecond)
+	fc.Close()
+	time.Sleep(100 * time.Millisecond)
+	fc = dial(t, e.srv.URL, e.tenant.AppKey, f) // 宽限期内重连
+	defer fc.Close()
+	time.Sleep(700 * time.Millisecond)
+	if count(f.Accid, true) != 1 || count(f.Accid, false) != 0 {
+		t.Fatalf("flap events: online=%d offline=%d", count(f.Accid, true), count(f.Accid, false))
+	}
+	if p, _ = get(f.Accid); !p.Online {
+		t.Fatalf("after reconnect: %+v", p)
 	}
 }

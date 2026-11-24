@@ -23,6 +23,8 @@
 | POST/GET/DELETE /v1/faqs | 租户 | 知识库 |
 | GET /v1/sessions, /v1/sessions/{id}/messages?since= | 租户 | 会话/消息查询 |
 | POST /v1/messages | 租户 | 服务端下发消息：`{session_id 或 to(访客accid), type, body, client_msg_id}`；同一 client_msg_id 幂等；发送者为 `business`(role=system)，客户端按通知样式展示；`to` 没有未关闭会话时自动新建 |
+| GET /v1/accounts/{accid}/presence | 租户 | 在线状态：`{online, connections(同时在线端数), last_seen_at(离线时)}`，账号不存在返回 404 |
+| POST /v1/presence | 租户 | 批量查询 `{accids:[…≤100]}`，按输入顺序返回，不存在的 `exists:false` |
 | GET /v1/accounts/{accid}/recent?include_closed=1 | 租户 | 该账号的最近会话（最后消息预览、未读数），按最后活动时间倒序 |
 | PUT/GET/DELETE /v1/webhook | 租户 | 配置消息回调地址；PUT `{url, rotate_secret?}` 返回签名密钥 `secret` |
 | POST/GET /v1/sensitive-words, DELETE /v1/sensitive-words/{id} | 租户 | 敏感词库：POST `{words:[…], action:"mask"\|"block"}`（单词≥2字，每租户≤5000） |
@@ -32,6 +34,12 @@
 客户端 → 服务端 `op`: `start`(访客开始咨询) · `send`{session_id,client_msg_id,type,body} · `sync`{session_id,since_seq} · `close` · `typing` · `ping`
 客户端另有：`recent`{include_closed}（最近会话+未读）· `read`{session_id,seq}（推进已读游标，不会超过最新 seq，并同步给同账号其他端）
 服务端 → 客户端 `op`: `session` · `msg` · `ack` · `queue`{position} · `synced` · `recent` · `read` · `typing` · `error`
+
+## 在线状态
+- 在线 = 账号至少有一个 WebSocket 连接（多端同时在线时 `connections` > 1）；`last_seen_at` 是最后一次**断开**的时间，在线时不返回。
+- `GET /v1/accounts?role=agent` 的每项也带 `online`，可直接用于坐席管理页。
+- `presence.changed` 回调：`{accid, role, online, at(ms)}`。上线立即发；**下线要等 10 秒宽限期**，期间重连则不发（页面刷新、网络抖动不会刷屏）。
+- ⚠️ 在线状态来自进程内连接表，**只有单实例部署时才准确**；多实例前需把连接表/心跳放到共享存储（Redis 等）。
 
 ## 敏感词过滤
 访客/坐席发送的**文本**消息在落库前过滤（机器人回复与服务端下发的消息不过滤）：
@@ -50,7 +58,7 @@
 - 一个 token 同时只属于一个账号（同机换号登录时自动转移）；每账号最多保留最近 10 台设备。
 
 ## 消息回调（抄送）
-配置 `PUT /v1/webhook` 后，以下事件会 POST 到你的地址：`message.created`（所有消息，含机器人/系统/服务端下发）、`message.moderated`、`push.offline`、`session.created` / `session.queued` / `session.assigned` / `session.closed`。
+配置 `PUT /v1/webhook` 后，以下事件会 POST 到你的地址：`message.created`（所有消息，含机器人/系统/服务端下发）、`message.moderated`、`push.offline`、`presence.changed`、`session.created` / `session.queued` / `session.assigned` / `session.closed`。
     POST <url>   {"event_id":123,"type":"message.created","created_at":<ms>,"data":{"session":{...},"message":{...}}}
     X-Kefu-Event-Id / X-Kefu-Event-Type / X-Kefu-Timestamp(秒) / X-Kefu-Signature: sha256=hex(HMAC_SHA256(secret, timestamp + "." + body))
 - 返回 2xx 即成功；否则按 10s、30s、2m、10m、30m、1h、3h 退避重试，共 8 次后标记 dead。
@@ -65,5 +73,5 @@ cmd/server 入口 · internal/store 持久化 · internal/bot FAQ+LLM 应答 · 
 - 单机内存 Hub；多实例需 Redis/NATS 做跨节点推送与在线状态。
 - 存储为 MySQL 8（InnoDB/utf8mb4）；表结构在 store.schema 中自动创建，后续演进建议改用 golang-migrate 等迁移工具。
 - 分配坐席的互斥锁是进程内的；多实例部署前需改为分布式锁（如 MySQL GET_LOCK 或 Redis）。
-- 坐席掉线时其进行中会话不自动回收；缺少内置厂商推送通道、图片/语义级内容安全、用户在线状态查询接口、会话评价、转接给指定坐席、富媒体上传、管理后台前端、限流。
+- 坐席掉线时其进行中会话不自动回收；缺少内置厂商推送通道、图片/语义级内容安全、会话评价、转接给指定坐席、富媒体上传、管理后台前端、限流。
 - CheckOrigin 目前放开，需按租户域名白名单。
