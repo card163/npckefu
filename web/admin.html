@@ -204,10 +204,41 @@ async function pageSessions(root){
     moreBtn.hidden=!more}
   const q=h('button',{class:'btn primary',onclick:safe(()=>load(true))},'查询');
   visitor.onkeydown=e=>{if(e.key==='Enter')q.click()};
-  root.append(h('div',{class:'panel'},h('div',{class:'row',style:'margin-bottom:12px'},status,agent,visitor,q),
+  const exportBtn=h('button',{class:'btn',onclick:()=>exportDialog({status:status.value,agent:agent.value,visitor:visitor.value.trim()})},'导出…');
+  root.append(h('div',{class:'panel'},h('div',{class:'row',style:'margin-bottom:12px'},status,agent,visitor,q,h('span',{style:'flex:1'}),exportBtn),
     h('div',{class:'tablewrap'},h('table',{},h('thead',{},h('tr',{},['会话','访客','坐席','状态','最后一条消息','最后活动'].map(x=>h('th',{},x)))),tbody)),
     h('div',{class:'row',style:'justify-content:center;margin-top:12px'},moreBtn)));
   await load(true)}
+
+/* ---- 导出：会话列表 / 聊天记录，CSV 或 JSONL ---- */
+const ymd=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+async function downloadExport(kind,params){
+  const r=await fetch('/v1/export/'+kind+'?'+params,{headers:{'X-App-Key':AUTH.ak,'X-App-Secret':AUTH.sec}}); // 认证走请求头，所以不能用普通链接下载
+  if(r.status===401){logout('登录已失效，请重新登录');throw new Error('登录已失效')}
+  if(!r.ok){let m='导出失败（'+r.status+'）';try{m=(await r.json()).error||m}catch(e){}throw new Error(m)}
+  const blob=await r.blob(),name=(/filename="([^"]+)"/.exec(r.headers.get('Content-Disposition')||'')||[])[1]||'export.csv';
+  const a=h('a',{href:URL.createObjectURL(blob),download:name});document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),10000);
+  return {name,size:blob.size}}
+function exportDialog(filters){
+  const kind=h('select',{},h('option',{value:'sessions'},'会话列表（每个会话一行：状态、评价、转接次数、消息数、时长）'),h('option',{value:'messages'},'聊天记录（每条消息一行）'));
+  const fmtSel=h('select',{},h('option',{value:'csv'},'CSV（Excel/WPS 可直接打开）'),h('option',{value:'jsonl'},'JSONL（每行一个 JSON，便于程序处理）'));
+  const to=new Date(),from=new Date();from.setDate(from.getDate()-29);
+  const d1=h('input',{type:'date',value:ymd(from)}),d2=h('input',{type:'date',value:ymd(to)});
+  const noSys=h('input',{type:'checkbox'}),sysRow=h('label',{class:'row',style:'font-weight:400'},noSys,'不含系统消息和服务端通知');
+  const limit=h('input',{type:'number',min:1,max:1000000,value:100000});
+  const used=[filters.status&&'状态='+(STATUS[filters.status]||filters.status),filters.agent&&'坐席='+filters.agent,filters.visitor&&'访客='+filters.visitor].filter(Boolean);
+  kind.onchange=()=>{sysRow.hidden=kind.value!=='messages'};sysRow.hidden=true;
+  modal('导出会话历史',h('div',{},field('导出内容',kind),field('格式',fmtSel),
+    field('会话创建日期',h('div',{class:'row'},d1,'至',d2),'按你浏览器所在时区计算，含结束当天'),sysRow,
+    field('最多导出条数',limit,'达到上限会停止，请缩小日期范围分批导出。'),
+    h('div',{class:'mut'},used.length?'将沿用当前筛选：'+used.join('，'):'当前没有筛选条件，导出区间内的全部会话。'),
+    h('div',{class:'mut',style:'margin-top:8px'},'导出文件包含访客的聊天内容，请妥善保管。浏览器会把文件完整读入内存后再保存；数据量很大时请改用接口（见 README）。')),
+    [{text:'取消'},{text:'导出',kind:'primary',onclick:async()=>{
+      if(!d1.value||!d2.value)throw new Error('请选择起止日期');
+      const p=new URLSearchParams({format:fmtSel.value,from:d1.value,to:d2.value,tz:Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC',limit:limit.value||100000});
+      if(filters.status)p.set('status',filters.status);if(filters.agent)p.set('agent',filters.agent);if(filters.visitor)p.set('visitor',filters.visitor);
+      if(kind.value==='messages'&&noSys.checked)p.set('exclude_system','1');
+      const r=await downloadExport(kind.value,p);toast('已导出 '+r.name+'（'+(r.size/1024).toFixed(1)+' KB）')}}])}
 
 /* ---- 会话详情抽屉：聊天记录、转接、结束、评价、转接历史 ---- */
 function msgNode(m){
