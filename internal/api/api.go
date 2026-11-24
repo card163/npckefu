@@ -86,6 +86,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("PUT /v1/settings/queue", a.tenantAuth(a.putQueueSettings))
 	mux.HandleFunc("GET /v1/tenant", a.tenantAuth(a.tenantInfo))
 	mux.HandleFunc("GET /v1/sessions/{id}", a.tenantAuth(a.getSession))
+	mux.HandleFunc("GET /v1/stats/agents", a.tenantAuth(a.agentStats))
 	mux.HandleFunc("GET /v1/stats/overview", a.tenantAuth(a.overview))
 	mux.HandleFunc("GET /v1/agents/roster", a.tenantAuth(a.roster))
 	mux.HandleFunc("POST /v1/sessions/{id}/close", a.tenantAuth(a.closeSession))

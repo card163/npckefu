@@ -46,6 +46,15 @@ func (s *Store) ApplyTransfer(ctx context.Context, tenantID int64, t *Transfer, 
 	if n, _ := r.RowsAffected(); n == 0 {
 		return false, nil
 	}
+	// 工作量统计：结束原坐席的接待；直接转给新坐席时同时开始新坐席的接待
+	if _, err := tx.ExecContext(ctx, `UPDATE session_assignments SET ended_at=NOW(3), end_reason='transferred' WHERE session_id=? AND ended_at IS NULL`, t.SessionID); err != nil {
+		return false, err
+	}
+	if newAgent != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO session_assignments(tenant_id,session_id,agent_accid,source,assigned_at) VALUES(?,?,?,'transfer',NOW(3))`, tenantID, t.SessionID, newAgent); err != nil {
+			return false, err
+		}
+	}
 	done := 0
 	if newAgent != "" {
 		done = 1

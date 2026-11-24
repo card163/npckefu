@@ -70,6 +70,21 @@ th{color:var(--mut);font-weight:500;font-size:12px;background:#fafafa}tr.click{c
 .msg img{max-width:200px;max-height:200px;display:block;border-radius:6px}
 #toasts{position:fixed;top:16px;right:16px;display:flex;flex-direction:column;gap:8px;z-index:99}
 .toast{background:var(--dark);color:#fff;padding:10px 16px;border-radius:8px;box-shadow:0 4px 14px #0003;max-width:360px;word-break:break-word}.toast.err{background:var(--err)}
+/* 图表（遵循 dataviz 规范：单系列只用 1 号色、细柱、发丝网格、文字用文字色而非数据色） */
+.viz{--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0d9;--axis:#c3c2b7;--series:#2a78d6;--series-hover:#3987e5;
+  background:var(--surface);border:1px solid #0b0b0b1a;border-radius:10px;padding:14px 14px 10px;position:relative}
+.viz h4{margin:0 0 2px;font-size:14px;color:var(--ink)}.viz .sub{color:var(--ink2);font-size:12px;margin-bottom:8px}
+.viz svg{display:block;width:100%;overflow:visible}.viz .hit{fill:transparent;cursor:default;outline:none}
+.viz .hit:focus-visible{stroke:var(--ink);stroke-width:1.5;stroke-dasharray:none}
+.viz .tip{position:absolute;pointer-events:none;background:#fff;border:1px solid #0b0b0b1a;border-radius:8px;padding:7px 10px;box-shadow:0 4px 14px #0002;font-size:12px;z-index:5;white-space:nowrap}
+.viz .tip b{display:block;font-size:16px;color:var(--ink);font-weight:600}.viz .tip span{color:var(--ink2)}
+.viz .tip i{display:inline-block;width:12px;height:2px;background:var(--series);margin-right:6px;vertical-align:middle}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.seg button{border:0;background:#fff;padding:5px 12px;cursor:pointer;color:var(--txt)}.seg button+button{border-left:1px solid var(--line)}
+.seg button.on{background:var(--pri);color:#fff}
+.tile .v{font-size:26px}.dim{opacity:.5;transition:opacity .15s}
+th.sort{cursor:pointer;user-select:none}th.sort:hover{color:var(--pri)}
+.tablewrap td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 .sec{margin:16px 0 6px;font-weight:600}
 pre.code{background:#0f172a;color:#e2e8f0;padding:12px;border-radius:8px;overflow:auto;font-size:12px;margin:6px 0}
 </style></head><body>
@@ -143,7 +158,7 @@ function showLogin(msg){
 /* ============ 外壳与路由 ============ */
 const PAGES=[
   ['dashboard','概览','📊',pageDashboard],['sessions','会话','💬',pageSessions],['agents','坐席','🧑‍💼',pageAgents],
-  ['faq','知识库','📚',pageFaq],['words','敏感词','🚫',pageWords],['ratings','评价','⭐',pageRatings],
+  ['faq','知识库','📚',pageFaq],['words','敏感词','🚫',pageWords],['ratings','评价','⭐',pageRatings],['reports','报表','📈',pageReports],
   ['webhook','回调','🔔',pageWebhook],['settings','设置','⚙️',pageSettings],['access','接入','🔌',pageAccess]];
 
 function showShell(){
@@ -215,7 +230,7 @@ async function pageSessions(root){
 /* ---- 导出：会话列表 / 聊天记录，CSV 或 JSONL ---- */
 const ymd=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
 async function downloadExport(kind,params){
-  const r=await fetch('/v1/export/'+kind+'?'+params,{headers:{'X-App-Key':AUTH.ak,'X-App-Secret':AUTH.sec}}); // 认证走请求头，所以不能用普通链接下载
+  const r=await fetch((kind==='agents-csv'?'/v1/stats/agents':'/v1/export/'+kind)+'?'+params,{headers:{'X-App-Key':AUTH.ak,'X-App-Secret':AUTH.sec}}); // 认证走请求头，所以不能用普通链接下载
   if(r.status===401){logout('登录已失效，请重新登录');throw new Error('登录已失效')}
   if(!r.ok){let m='导出失败（'+r.status+'）';try{m=(await r.json()).error||m}catch(e){}throw new Error(m)}
   const blob=await r.blob(),name=(/filename="([^"]+)"/.exec(r.headers.get('Content-Disposition')||'')||[])[1]||'export.csv';
@@ -350,6 +365,83 @@ async function pageWords(root){
     panel.replaceChildren(h('h3',{},'敏感词库（'+list.length+' / 5000）'),list.length?h('div',{class:'row'},list.map(w=>h('span',{class:'badge '+(w.action==='block'?'dead':'pending'),style:'padding:3px 4px 3px 10px'},w.word+' · '+(w.action==='block'?'拒绝':'屏蔽')+' ',
       h('button',{class:'btn sm',style:'margin-left:4px;padding:0 6px',title:'删除',onclick:safe(async()=>{await api('DELETE','/v1/sensitive-words/'+w.id);await load()})},'×')))):h('div',{class:'empty'},'还没有敏感词'))}
   await load()}
+
+/* ============ 报表：坐席工作量 ============ */
+const SVGNS='http://www.w3.org/2000/svg';
+const sv=(tag,attrs,...kids)=>{const e=document.createElementNS(SVGNS,tag);for(const[k,v]of Object.entries(attrs||{}))if(v!=null)e.setAttribute(k,v);for(const c of kids.flat())if(c!=null)e.append(c instanceof Node?c:String(c));return e};
+const niceStep=max=>{const raw=Math.max(max,1)/4,p=Math.pow(10,Math.floor(Math.log10(raw))),n=raw/p;return (n<=1?1:n<=2?2:n<=5?5:10)*p};
+
+/* 单系列柱图：柱宽 ≤24px，顶部 4px 圆角、底部贴基线；发丝实线网格；只直接标注峰值；悬停/键盘聚焦出提示；每个值也能在“表格”里看到 */
+function columnChart(box,data,unit){
+  box.style.position='relative'; // 提示框相对图表定位
+  const W=Math.max(320,box.clientWidth||640),H=230,m={l:40,r:8,t:22,b:26},pw=W-m.l-m.r,ph=H-m.t-m.b,n=data.length;
+  const maxV=Math.max(0,...data.map(d=>d.value)),step=niceStep(maxV),top=Math.max(step*4,step),
+    y=v=>m.t+ph-(v/top)*ph,slot=pw/n,bw=Math.max(2,Math.min(24,slot-2)),peak=data.reduce((a,d,i)=>d.value>data[a].value?i:a,0);
+  const svg=sv('svg',{viewBox:`0 0 ${W} ${H}`,role:'img','aria-label':`${unit}每日柱状图，共 ${n} 天，峰值 ${maxV}`}),gridG=sv('g'),barG=sv('g'),hitG=sv('g'),txtG=sv('g');
+  for(let t=0;t<=top+1e-9;t+=step){gridG.append(sv('line',{x1:m.l,x2:W-m.r,y1:y(t),y2:y(t),stroke:t===0?'var(--axis)':'var(--grid)','stroke-width':1}),
+    sv('text',{x:m.l-6,y:y(t)+4,'text-anchor':'end','font-size':11,fill:'var(--muted)'},Math.round(t*100)/100))}
+  const every=Math.max(1,Math.ceil(n/Math.max(1,Math.floor(pw/64))));
+  const tip=h('div',{class:'tip',hidden:true}),bars=[];
+  const show=(i,cx)=>{const d=data[i];bars[i].setAttribute('fill','var(--series-hover)');tip.replaceChildren(h('b',{},d.value+' '+unit),h('span',{},h('i'),d.label+(d.extra?'　'+d.extra:'')));
+    tip.hidden=false;const sr=svg.getBoundingClientRect(),br=box.getBoundingClientRect(),k=sr.width/W,tw=tip.offsetWidth; // SVG 元素没有 clientHeight/offsetTop，按外框矩形换算
+    let left=(sr.left-br.left)+cx*k-tw/2;left=Math.max(4,Math.min(box.clientWidth-tw-4,left));tip.style.left=left+'px';tip.style.top=Math.max(0,(sr.top-br.top)+y(d.value)*k-tip.offsetHeight-10)+'px'};
+  const hide=i=>{bars[i].setAttribute('fill','var(--series)');tip.hidden=true};
+  data.forEach((d,i)=>{const x=m.l+i*slot+(slot-bw)/2,bh=(d.value/top)*ph,r=Math.min(4,bh,bw/2),b=m.t+ph;
+    const path=bh<=0?null:sv('path',{d:`M${x},${b} V${b-bh+r} a${r},${r} 0 0 1 ${r},${-r} H${x+bw-r} a${r},${r} 0 0 1 ${r},${r} V${b} Z`,fill:'var(--series)'}); // 顶部圆角、底部方
+    bars.push(path||sv('g'));if(path)barG.append(path);
+    if((i%every===0&&n-1-i>=every*0.6)||i===n-1)txtG.append(sv('text',{x:i===n-1?Math.min(x+bw/2,W-m.r-12):x+bw/2,y:H-8,'text-anchor':'middle','font-size':11,fill:'var(--muted)'},d.label.slice(5))); // 最后一个日期必标；与它太近的常规刻度让位，避免挤在一起
+    const hit=sv('rect',{class:'hit',x:m.l+i*slot,y:m.t,width:slot,height:ph,tabindex:0,'aria-label':`${d.label}：${d.value} ${unit}`});
+    hit.addEventListener('pointermove',()=>show(i,x+bw/2));hit.addEventListener('pointerleave',()=>hide(i));hit.addEventListener('focus',()=>show(i,x+bw/2));hit.addEventListener('blur',()=>hide(i));hitG.append(hit)});
+  if(data[peak].value>0){const d=data[peak],x=m.l+peak*slot+slot/2;txtG.append(sv('text',{x:Math.min(W-m.r-8,Math.max(m.l+8,x)),y:y(d.value)-6,'text-anchor':'middle','font-size':12,'font-weight':600,fill:'var(--ink)'},d.value))} // 只标峰值
+  svg.append(gridG,barG,txtG,hitG);box.replaceChildren(svg,tip)}
+
+async function pageReports(root){
+  const ro=await api('GET','/v1/agents/roster');
+  const tz=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC',day=d=>ymd(d),addDays=(d,k)=>{const x=new Date(d);x.setDate(x.getDate()+k);return x};
+  let period='7',metric='sessions',agent='',view='chart',data=null,sortKey='sessions',sortDir=-1;
+  const today=new Date(),from=h('input',{type:'date',value:day(addDays(today,-6))}),to=h('input',{type:'date',value:day(today)}),custom=h('span',{class:'row',hidden:true},from,'至',to);
+  const presets=[['0','今天'],['7','近 7 天'],['30','近 30 天'],['c','自定义']];
+  const seg=h('div',{class:'seg'},presets.map(([k,t])=>h('button',{'data-k':k,class:k===period?'on':'',onclick:()=>{period=k;custom.hidden=k!=='c';[...seg.children].forEach(b=>b.classList.toggle('on',b.dataset.k===k));if(k!=='c')load()}},t)));
+  const agentSel=h('select',{onchange:()=>{agent=agentSel.value;load()}},h('option',{value:''},'全部坐席'),ro.map(a=>h('option',{value:a.accid},a.name||a.accid)));
+  const exportBtn=h('button',{class:'btn',onclick:safe(async()=>{const r=await downloadExport('agents-csv',params('csv'));toast('已导出 '+r.name)})},'导出 CSV');
+  const apply=h('button',{class:'btn primary',onclick:safe(()=>load())},'查询');custom.append(apply);
+  const kpis=h('div',{class:'cards'}),chartBox=h('div'),tableBox=h('div',{class:'panel'}),frame=h('div');
+  root.append(h('div',{class:'row',style:'margin-bottom:14px'},seg,custom,agentSel,h('span',{style:'flex:1'}),exportBtn),frame);
+  frame.append(kpis,h('div',{class:'viz',style:'margin-bottom:16px'},chartBox),tableBox);
+  function range(){if(period==='c')return [from.value,to.value];const n=+period;return [day(addDays(today,-n+(n?1:0))),day(today)]}
+  function params(fmt){const [f,t]=range();const p=new URLSearchParams({from:f,to:t,tz});if(agent)p.set('agent',agent);if(fmt)p.set('format',fmt);return p}
+  async function load(){
+    frame.classList.add('dim'); // 重新取数时保留上一次的画面，只降低透明度，不闪骨架屏
+    try{const [f,t]=range();if(!f||!t)throw new Error('请选择起止日期');data=await api('GET','/v1/stats/agents?'+params());draw()}catch(e){if(e.message!=='登录已失效')toast(e.message,'err')}finally{frame.classList.remove('dim')}}
+  const secs=v=>v==null?'–':v<10?v.toFixed(1)+' 秒':fmtDur(v),pct=v=>v==null?'–':Math.round(v*100)+'%';
+  function draw(){
+    const t=data.totals;
+    const tile=(l,v,s)=>h('div',{class:'card tile'},h('div',{class:'l'},l),h('div',{class:'v'},v),h('div',{class:'s'},s||' '));
+    put(kpis,tile('接待会话',t.sessions,'接待 '+t.assignments+' 次（含转接）'),tile('平均首次响应',secs(t.avg_first_reply_seconds),'从接到会话到第一条回复'),
+      tile('平均接待时长',secs(t.avg_handle_seconds),'仅已结束的接待'),tile('发送消息',t.messages,'坐席发出的消息数'),
+      tile('满意度',t.ratings?t.avg_rating.toFixed(1)+' 分':'–',t.ratings?t.ratings+' 条评价 · 满意率 '+pct(t.satisfaction_rate):'这段时间暂无评价'));
+    const isS=metric==='sessions',unit=isS?'个会话':'条消息',series=data.daily.map(d=>({label:d.date,value:isS?d.sessions:d.messages,extra:isS?d.messages+' 条消息':d.sessions+' 个会话'}));
+    const total=series.reduce((a,d)=>a+d.value,0);
+    const title=h('h4',{},isS?'每日接待会话数':'每日发送消息数'),sub=h('div',{class:'sub'},'共 '+total+(isS?' 个会话次':' 条消息')+' · '+data.daily.length+' 天 · 时区 '+data.tz);
+    const metricSeg=h('div',{class:'seg'},[['sessions','接待会话'],['messages','发送消息']].map(([k,tx])=>h('button',{class:k===metric?'on':'',onclick:()=>{metric=k;draw()}},tx)));
+    const viewSeg=h('div',{class:'seg'},[['chart','图表'],['table','表格']].map(([k,tx])=>h('button',{class:k===view?'on':'',onclick:()=>{view=k;draw()}},tx)));
+    const head=h('div',{class:'row',style:'justify-content:space-between;margin-bottom:6px'},h('div',{},title,sub),h('div',{class:'row'},metricSeg,viewSeg));
+    const body=h('div');
+    if(view==='table'){body.append(h('div',{class:'tablewrap',style:'max-height:260px;overflow:auto'},h('table',{},h('thead',{},h('tr',{},h('th',{},'日期'),h('th',{class:'num'},'接待会话'),h('th',{class:'num'},'发送消息'))),
+      h('tbody',{},data.daily.map(d=>h('tr',{},h('td',{},d.date),h('td',{class:'num'},d.sessions),h('td',{class:'num'},d.messages)))))))}
+    else if(!total){body.append(h('div',{class:'empty'},'这段时间没有接待记录'))}
+    put(chartBox,head,body);if(view==='chart'&&total)requestAnimationFrame(()=>columnChart(body,series,unit));
+    // 各坐席明细（可点表头排序）
+    const cols=[['agent_accid','坐席',false],['sessions','接待会话',true],['assignments','接待次数',true],['avg_first_reply_seconds','平均首次响应',true],['max_first_reply_seconds','最长首次响应',true],['avg_handle_seconds','平均接待时长',true],
+      ['messages','发送消息',true],['transferred_in','转入',true],['transferred_out','转出',true],['ratings','评价数',true],['avg_rating','平均分',true],['satisfaction_rate','满意率',true]];
+    const rows=[...data.agents].sort((a,b)=>{const x=a[sortKey],y=b[sortKey];if(x==null&&y==null)return 0;if(x==null)return 1;if(y==null)return -1;return (typeof x==='string'?x.localeCompare(y):x-y)*sortDir});
+    put(tableBox,h('h3',{},'各坐席工作量'),rows.length?h('div',{class:'tablewrap'},h('table',{},h('thead',{},h('tr',{},cols.map(([k,l,num])=>h('th',{class:'sort '+(num?'num':''),onclick:()=>{if(sortKey===k)sortDir=-sortDir;else{sortKey=k;sortDir=num?-1:1}draw()}},l+(sortKey===k?(sortDir<0?' ↓':' ↑'):''))))),
+      h('tbody',{},rows.map(a=>h('tr',{},h('td',{},h('span',{class:'dot '+(a.online?'on':'')}),a.name||a.agent_accid,h('div',{class:'mut mono'},a.agent_accid)),h('td',{class:'num'},a.sessions),h('td',{class:'num'},a.assignments),
+        h('td',{class:'num'},secs(a.avg_first_reply_seconds)),h('td',{class:'num'},secs(a.max_first_reply_seconds)),h('td',{class:'num'},secs(a.avg_handle_seconds)),h('td',{class:'num'},a.messages),
+        h('td',{class:'num'},a.transferred_in),h('td',{class:'num'},a.transferred_out),h('td',{class:'num'},a.ratings),h('td',{class:'num'},a.avg_rating==null?'–':a.avg_rating.toFixed(1)),h('td',{class:'num'},pct(a.satisfaction_rate))))))):h('div',{class:'empty'},'还没有坐席'),
+      h('p',{class:'mut',style:'margin:10px 0 0;font-size:12px'},'接待按“接到会话的时间”归属，消息、评价按各自发生的时间；首次响应＝从接到会话到该坐席的第一条回复；只统计该功能上线后产生的接待。'))}
+  let rz;const onResize=()=>{clearTimeout(rz);rz=setTimeout(()=>data&&draw(),150)};window.addEventListener('resize',onResize);
+  await load();return()=>window.removeEventListener('resize',onResize)}
 
 /* ============ 评价 ============ */
 async function pageRatings(root){

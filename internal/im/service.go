@@ -201,6 +201,11 @@ func (s *Service) Send(ctx context.Context, acc *store.Account, in SendReq) (*st
 		return m, nil
 	}
 	s.deliver(sess, m)
+	if acc.Role == store.RoleAgent { // 工作量统计：记录本次接待的首次回复时间
+		if err := s.St.MarkFirstReply(ctx, sess.ID, acc.Accid, m.CreatedAt); err != nil {
+			log.Printf("first reply: %v", err)
+		}
+	}
 
 	if acc.Role == store.RoleVisitor && in.Type == "text" {
 		go s.afterVisitorMessage(sess, in.Body)
@@ -304,6 +309,13 @@ func (s *Service) Dispatch(ctx context.Context, tenantID int64) {
 		a := cands[0]
 		if err := s.St.SetSessionStatus(ctx, tenantID, q.ID, store.StatusActive, a.Accid); err != nil {
 			continue
+		}
+		source := "dispatch"
+		if _, ok := pending[q.ID]; ok {
+			source = "transfer" // 坐席把会话退回队列后被同事接手：对接手人来说也是"转入"
+		}
+		if err := s.St.InsertAssignment(ctx, tenantID, q.ID, a.Accid, source); err != nil { // 工作量统计
+			log.Printf("assignment: %v", err)
 		}
 		load[a.Accid]++
 		q.Status, q.AgentAccid = store.StatusActive, a.Accid

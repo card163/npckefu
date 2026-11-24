@@ -169,6 +169,13 @@ var schema = []string{
   tenant_id BIGINT PRIMARY KEY, remind_after INT NOT NULL, remind_every INT NOT NULL, remind_max INT NOT NULL,
   alert_after INT NOT NULL, giveup_after INT NOT NULL, remind_message VARCHAR(500) NOT NULL, giveup_message VARCHAR(500) NOT NULL,
   updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+	// 坐席接待记录：一次"会话分给某坐席"一行，用于工作量统计（接待数、首次响应、接待时长、转入转出）。
+	// 只记录该功能上线之后产生的接待，不回填历史。
+	`CREATE TABLE IF NOT EXISTS session_assignments(
+  id BIGINT AUTO_INCREMENT PRIMARY KEY, tenant_id BIGINT NOT NULL, session_id BIGINT NOT NULL, agent_accid VARCHAR(64) NOT NULL,
+  source VARCHAR(10) NOT NULL, assigned_at DATETIME(3) NOT NULL, first_reply_at DATETIME(3) NULL,
+  ended_at DATETIME(3) NULL, end_reason VARCHAR(12) NOT NULL DEFAULT '',
+  KEY idx_agent_time(tenant_id, agent_accid, assigned_at), KEY idx_time(tenant_id, assigned_at), KEY idx_session(session_id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 	`CREATE TABLE IF NOT EXISTS faqs(
   id BIGINT AUTO_INCREMENT PRIMARY KEY, tenant_id BIGINT NOT NULL,
   question VARCHAR(512) NOT NULL, answer TEXT NOT NULL, keywords VARCHAR(512) NOT NULL DEFAULT '',
@@ -445,8 +452,13 @@ func (s *Store) SetSessionStatus(ctx context.Context, tenantID, id int64, status
 	case StatusQueued:
 		q = `UPDATE sessions SET status=?, agent_accid=?, queued_at=NOW(3), queue_reminders=0, queue_alerted=0 WHERE tenant_id=? AND id=?`
 	}
-	_, err := s.db.ExecContext(ctx, q, status, agent, tenantID, id)
-	return err
+	if _, err := s.db.ExecContext(ctx, q, status, agent, tenantID, id); err != nil {
+		return err
+	}
+	if status == StatusClosed {
+		return s.endAssignment(ctx, id, "closed")
+	}
+	return nil
 }
 
 func (s *Store) IncBotMisses(ctx context.Context, id int64, reset bool) (int, error) {

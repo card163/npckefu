@@ -30,7 +30,47 @@ type exportParams struct {
 	excludeSystem bool
 }
 
-// 日期范围：from/to 为 RFC3339 或 YYYY-MM-DD（纯日期按 tz 时区的当天 0 点解释；to 为纯日期时包含当天）。默认最近 30 天。
+// parseRange 解析 from/to：RFC3339 或 YYYY-MM-DD（纯日期按 loc 时区的当天 0 点解释；to 为纯日期时包含当天）。
+// 都不给时取最近 defaultDays 天。区间为 [from, to)。
+func parseRange(q url.Values, loc *time.Location, defaultDays int) (from, to time.Time, err error) {
+	parse := func(name string, endOfDay bool) (time.Time, bool, error) {
+		v := q.Get(name)
+		if v == "" {
+			return time.Time{}, false, nil
+		}
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			return t, true, nil
+		}
+		t, err := time.ParseInLocation("2006-01-02", v, loc)
+		if err != nil {
+			return time.Time{}, false, fmt.Errorf("%s: RFC3339 or YYYY-MM-DD", name)
+		}
+		if endOfDay {
+			t = t.AddDate(0, 0, 1)
+		}
+		return t, true, nil
+	}
+	to, ok, err := parse("to", true)
+	if err != nil {
+		return from, to, err
+	}
+	if !ok {
+		to = time.Now().Add(time.Minute)
+	}
+	from, ok, err = parse("from", false)
+	if err != nil {
+		return from, to, err
+	}
+	if !ok {
+		from = to.AddDate(0, 0, -defaultDays)
+	}
+	if !from.Before(to) {
+		return from, to, errors.New("from must be before to")
+	}
+	return from, to, nil
+}
+
+// 导出参数：见 parseRange（默认最近 30 天）。
 func parseExport(q url.Values) (p exportParams, err error) {
 	p.loc = time.UTC
 	if tz := q.Get("tz"); tz != "" {
@@ -45,39 +85,9 @@ func parseExport(q url.Values) (p exportParams, err error) {
 	default:
 		return p, errors.New("format: csv or jsonl")
 	}
-	parse := func(name string, endOfDay bool) (time.Time, bool, error) {
-		v := q.Get(name)
-		if v == "" {
-			return time.Time{}, false, nil
-		}
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
-			return t, true, nil
-		}
-		t, err := time.ParseInLocation("2006-01-02", v, p.loc)
-		if err != nil {
-			return time.Time{}, false, fmt.Errorf("%s: RFC3339 or YYYY-MM-DD", name)
-		}
-		if endOfDay {
-			t = t.AddDate(0, 0, 1)
-		}
-		return t, true, nil
-	}
-	to, ok, err := parse("to", true)
+	from, to, err := parseRange(q, p.loc, 30)
 	if err != nil {
 		return p, err
-	}
-	if !ok {
-		to = time.Now().Add(time.Minute)
-	}
-	from, ok, err := parse("from", false)
-	if err != nil {
-		return p, err
-	}
-	if !ok {
-		from = to.AddDate(0, 0, -30)
-	}
-	if !from.Before(to) {
-		return p, errors.New("from must be before to")
 	}
 	p.f = store.ExportFilter{From: from, To: to, Status: q.Get("status"), Agent: q.Get("agent"), Visitor: q.Get("visitor"), Limit: exportDefaultLimit}
 	if v := q.Get("limit"); v != "" {
