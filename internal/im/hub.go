@@ -31,6 +31,9 @@ type Event struct {
 	Seq         int64              `json:"seq,omitempty"`
 	Position    int                `json:"position,omitempty"`
 	Error       string             `json:"error,omitempty"`
+	Score       int                `json:"score,omitempty"`
+	Comment     string             `json:"comment,omitempty"`
+	From        string             `json:"from,omitempty"`
 }
 
 type Conn struct {
@@ -225,6 +228,8 @@ type inbound struct {
 	IncludeClosed bool   `json:"include_closed"`
 	Platform      string `json:"platform"`
 	Token         string `json:"token"`
+	Score         int    `json:"score"`
+	Comment       string `json:"comment"`
 }
 
 // ServeWS 登录鉴权：?appkey=&accid=&token=（token 由租户服务端通过注册接口下发）。
@@ -323,7 +328,7 @@ func (s *Service) handle(c *Conn, in inbound) {
 		}
 	}
 	fail := func(err error) {
-		if !errors.Is(err, ErrForbidden) && !errors.Is(err, ErrBadInput) && !errors.Is(err, ErrClosed) && !errors.Is(err, ErrSensitive) && !errors.Is(err, ErrBadFile) && !errors.Is(err, store.ErrNotFound) {
+		if !errors.Is(err, ErrForbidden) && !errors.Is(err, ErrBadInput) && !errors.Is(err, ErrClosed) && !errors.Is(err, ErrSensitive) && !errors.Is(err, ErrBadFile) && !errors.Is(err, ErrNotClosed) && !errors.Is(err, ErrRateExpired) && !errors.Is(err, ErrAlreadyRated) && !errors.Is(err, store.ErrNotFound) {
 			log.Printf("ws op=%s: %v", in.Op, err)
 			err = errors.New("internal error")
 		}
@@ -359,6 +364,13 @@ func (s *Service) handle(c *Conn, in inbound) {
 			return
 		}
 		reply(Event{Op: "recent", Recent: items})
+	case "rate": // 访客评价已结束的会话
+		r, err := s.Rate(ctx, c.acc, in.SessionID, in.Score, in.Comment)
+		if err != nil {
+			fail(err)
+			return
+		}
+		reply(Event{Op: "rated", SessionID: r.SessionID, Score: r.Score})
 	case "device": // 客户端登记/更新自己的推送 token
 		if err := s.RegisterDevice(ctx, c.acc, in.Platform, in.Token); err != nil {
 			fail(err)

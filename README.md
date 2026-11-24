@@ -48,6 +48,10 @@
 | GET /v1/accounts/{accid}/recent?include_closed=1 | 租户 | 该账号的最近会话（最后消息预览、未读数），按最后活动时间倒序 |
 | POST /v1/upload | 账号 `X-App-Key`+`X-Accid`+`X-Token`，或租户 `X-App-Key`+`X-App-Secret` | 上传图片（multipart，字段 `file`），返回 `{file_id,url,width,height,size,mime}` |
 | GET /files/{id} | 无（持有链接） | 读取图片 |
+| GET /v1/sessions/{id}/rating | 租户 | 查某会话的评价（没有返回 404） |
+| POST /v1/sessions/{id}/rating | 租户 | 租户服务端代访客提交评价 `{score, comment}`（评价入口在租户自己的 App 里时用） |
+| GET /v1/ratings?agent=&min_score=&max_score=&limit=&before= | 租户 | 评价列表，按会话 ID 倒序，`before` 翻页 |
+| GET /v1/stats/ratings?from=&to=&agent= | 租户 | 评价统计：数量、均分、满意率、1~5 分分布、各坐席均分。`from`/`to` 为 RFC3339 或 `YYYY-MM-DD`（`to` 为纯日期时含当天），默认最近 30 天 |
 | PUT/GET/DELETE /v1/webhook | 租户 | 配置消息回调地址；PUT `{url, rotate_secret?}` 返回签名密钥 `secret` |
 | POST/GET /v1/sensitive-words, DELETE /v1/sensitive-words/{id} | 租户 | 敏感词库：POST `{words:[…], action:"mask"\|"block"}`（单词≥2字，每租户≤5000） |
 | PUT /v1/accounts/{accid}/devices, DELETE …/devices/{token} | 租户 | 登记/删除推送设备 `{platform, token}`（也可由客户端经 WS `device` 自行登记） |
@@ -56,6 +60,14 @@
 客户端 → 服务端 `op`: `start`(访客开始咨询) · `send`{session_id,client_msg_id,type,body} · `sync`{session_id,since_seq} · `close` · `typing` · `ping`
 客户端另有：`recent`{include_closed}（最近会话+未读）· `read`{session_id,seq}（推进已读游标，不会超过最新 seq，并同步给同账号其他端）
 服务端 → 客户端 `op`: `session` · `msg` · `ack` · `queue`{position} · `synced` · `recent` · `read` · `typing` · `error`
+
+## 会话评价
+- 会话**结束后**，访客可打 1~5 分并附评语（≤500 字，选填）：WebSocket `{"op":"rate","session_id":…,"score":5,"comment":"…"}`，成功返回 `{op:"rated"}`。内置访客页会在会话结束时自动弹出评价卡片。
+- 规则：只能评**自己的**会话；会话必须已结束、且在结束后 **7 天内**；**每个会话只能评一次**，不可修改（重复提交返回“该会话已评价”）；坐席不能给自己的会话打分。
+- 评语会过**敏感词**：命中“屏蔽”词则替换后保存，命中“拒绝”词则整条拒收。
+- 机器人单独接待的会话也可评价，此时 `agent_accid` 为空（统计里的 `by_agent` 中以空 `agent_accid` 表示机器人）。评价记在**会话结束时**的接待坐席名下。
+- 通知：当时接待的坐席收到 `{op:"rated", session_id, score, comment, from}`（内置工作台会弹出提示，10 秒后消失；不在线则收不到，需自行查询）；租户收到 `session.rated` 回调。
+- 满意率 = 4~5 分占比。统计数字四舍五入到两位小数。
 
 ## 图片
 1. `POST /v1/upload` 上传，拿到 `file_id`；2. 发送 `{"op":"send","session_id":…,"type":"image","body":"{\"file_id\":\"…\"}"}`（租户服务端用 `POST /v1/messages`，同样 `type:"image"`）；3. 收到的消息 `type:"image"`，`body` 是服务端生成的 JSON：`{file_id,url:"/files/<id>",width,height,size,mime}`，客户端用 `url` 渲染（内置两个页面已支持：📎 选图、粘贴图片、点击看原图）。
@@ -89,7 +101,7 @@
 - 一个 token 同时只属于一个账号（同机换号登录时自动转移）；每账号最多保留最近 10 台设备。
 
 ## 消息回调（抄送）
-配置 `PUT /v1/webhook` 后，以下事件会 POST 到你的地址：`message.created`（所有消息，含机器人/系统/服务端下发）、`message.moderated`、`push.offline`、`presence.changed`、`session.created` / `session.queued` / `session.assigned` / `session.closed`。
+配置 `PUT /v1/webhook` 后，以下事件会 POST 到你的地址：`message.created`（所有消息，含机器人/系统/服务端下发）、`message.moderated`、`push.offline`、`presence.changed`、`session.rated`、`session.created` / `session.queued` / `session.assigned` / `session.closed`。
     POST <url>   {"event_id":123,"type":"message.created","created_at":<ms>,"data":{"session":{...},"message":{...}}}
     X-Kefu-Event-Id / X-Kefu-Event-Type / X-Kefu-Timestamp(秒) / X-Kefu-Signature: sha256=hex(HMAC_SHA256(secret, timestamp + "." + body))
 - 返回 2xx 即成功；否则按 10s、30s、2m、10m、30m、1h、3h 退避重试，共 8 次后标记 dead。
@@ -103,5 +115,5 @@ cmd/server 入口 · internal/store 持久化 · internal/bot FAQ+LLM 应答 · 
 ## 已知限制 / 下一步
 - 存储为 MySQL 8（InnoDB/utf8mb4）；表结构在 store.schema 中自动创建，后续演进建议改用 golang-migrate 等迁移工具。
 - 多实例下，节点**崩溃**（非优雅停机）时，其上的连接在 30 秒 TTL 后自动失效，在线状态查询随之正确，但**不会产生** `presence.changed` 离线事件、也不更新 `last_seen_at`（没有节点观察到“断开”）。
-- 坐席掉线时其进行中会话不自动回收；缺少内置厂商推送通道、图片内容审核、对象存储、会话评价、转接给指定坐席、语音/视频/文件消息、管理后台前端、全局接口限流（目前只有上传限流）。
+- 坐席掉线时其进行中会话不自动回收；缺少内置厂商推送通道、图片内容审核、对象存储、转接给指定坐席、语音/视频/文件消息、管理后台前端、全局接口限流（目前只有上传限流）。
 - CheckOrigin 目前放开，需按租户域名白名单。

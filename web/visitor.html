@@ -20,11 +20,21 @@ button.ghost{background:none;color:#fff;border:1px solid #fff8;padding:2px 10px;
 .b:has(img){padding:4px}
 .b img{max-width:220px;max-height:220px;display:block;border-radius:6px;cursor:zoom-in}
 .clip{cursor:pointer;font-size:20px;align-self:center;user-select:none}
+#rate{padding:12px 16px;border-top:1px solid #e5e7eb;background:#fff}
+#rate .rt{font-weight:600;margin-bottom:6px}
+#stars{display:flex;gap:6px;font-size:30px;line-height:1;margin-bottom:8px}
+#stars span{cursor:pointer;color:#d1d5db;user-select:none}#stars span.on{color:#f5a623}
+#rc{width:100%;height:56px;padding:8px 10px;border:1px solid #d5d9e0;border-radius:8px;font:inherit;resize:none;outline:none}
+#rate .rb{display:flex;gap:8px;margin-top:8px;align-items:center}
+button.gh{background:#eef1f5;color:#555}#rm{font-size:12px;color:#d9534f;margin-left:4px}
 #typing{height:18px;font-size:12px;color:#999;padding:0 16px}
 </style></head><body>
 <div id="app">
 <header><div><b>在线客服</b><div id="st">连接中…</div></div><button class="ghost" id="end">结束会话</button></header>
-<div id="list"></div><div id="typing"></div>
+<div id="list"></div><div id="rate" hidden><div class="rt">请为本次服务打分</div><div id="stars"></div>
+<textarea id="rc" maxlength="500" placeholder="说说您的感受（选填）"></textarea>
+<div class="rb"><button type="button" id="rs">提交评价</button><button type="button" class="gh" id="rk">跳过</button><span id="rm"></span></div></div>
+<div id="typing"></div>
 <form id="bar"><label class="clip" title="发送图片">📎<input type="file" id="file" accept="image/jpeg,image/png,image/gif,image/webp" hidden></label><input id="in" placeholder="请输入消息，输入“转人工”联系客服" autocomplete="off"><button>发送</button></form>
 </div>
 <script>
@@ -53,7 +63,7 @@ function on(ev){
   switch(ev.op){
   case 'session':
     sid=ev.session.id;
-    if(ev.session.status==='closed'){st('会话已结束');sid=0;lastSeq=0;seen.clear();$('in').placeholder='会话已结束，发送消息可重新咨询'}
+    if(ev.session.status==='closed'){const done=ev.session.id;st('会话已结束');sid=0;lastSeq=0;seen.clear();$('in').placeholder='会话已结束，发送消息可重新咨询';showRate(done)}
     else{st({bot:'机器人接待中',queued:'排队等待人工…',active:'人工客服服务中'}[ev.session.status]);
       send({op:'sync',session_id:sid,since_seq:lastSeq})}
     break;
@@ -61,7 +71,8 @@ function on(ev){
   case 'synced': ev.messages.forEach(add); break;
   case 'queue': st(ev.position>1?`排队中，前面还有 ${ev.position-1} 位`:'排队中，您是第 1 位'); break;
   case 'typing': $('typing').textContent='客服正在输入…';clearTimeout(tt);tt=setTimeout(()=>$('typing').textContent='',2500);break;
-  case 'error': sys('发送失败：'+ev.error); break;
+  case 'rated': $('rm').textContent='';$('rate').innerHTML='<div class="rt">感谢您的评价 🙏</div>';setTimeout(()=>{$('rate').hidden=true},1800);break;
+  case 'error': if(!$('rate').hidden){$('rm').textContent=ev.error;break} sys('发送失败：'+ev.error); break;
   }
 }
 let rt;function markRead(){clearTimeout(rt);rt=setTimeout(()=>{if(sid&&lastSeq&&document.visibilityState==='visible')send({op:'read',session_id:sid,seq:lastSeq})},200)}
@@ -83,6 +94,13 @@ async function sendImage(file){
   send({op:'send',session_id:sid,client_msg_id:crypto.randomUUID(),type:'image',body:JSON.stringify({file_id:f.file_id})})}
 $('file').onchange=e=>{sendImage(e.target.files[0]);e.target.value=''};
 document.addEventListener('paste',e=>{const it=[...(e.clipboardData?.items||[])].find(x=>x.type.startsWith('image/'));if(it){e.preventDefault();sendImage(it.getAsFile())}});
+// ---- 会话评价：会话结束后弹出，1~5 星 + 选填评语 ----
+let rateSid=0,score=0;
+const stars=[...Array(5)].map((_,i)=>{const s=document.createElement('span');s.textContent='★';s.onclick=()=>{score=i+1;paint()};$('stars').append(s);return s});
+const paint=()=>stars.forEach((s,i)=>s.classList.toggle('on',i<score));
+function showRate(id){rateSid=id;score=0;paint();$('rc').value='';$('rm').textContent='';$('rate').hidden=false;list.scrollTop=list.scrollHeight}
+$('rs').onclick=()=>{if(!score)return $('rm').textContent='请先选择星级';send({op:'rate',session_id:rateSid,score,comment:$('rc').value})};
+$('rk').onclick=()=>{$('rate').hidden=true};
 function add(m){
   if(seen.has(m.seq))return; seen.add(m.seq); lastSeq=Math.max(lastSeq,m.seq); markRead();
   if(m.from_role==='system')return sys(m.body);

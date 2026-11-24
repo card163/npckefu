@@ -77,6 +77,10 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/sensitive-words", a.tenantAuth(a.addWords))
 	mux.HandleFunc("GET /v1/sensitive-words", a.tenantAuth(a.listWords))
 	mux.HandleFunc("DELETE /v1/sensitive-words/{id}", a.tenantAuth(a.deleteWord))
+	mux.HandleFunc("POST /v1/sessions/{id}/rating", a.tenantAuth(a.rateSession))
+	mux.HandleFunc("GET /v1/sessions/{id}/rating", a.tenantAuth(a.getRating))
+	mux.HandleFunc("GET /v1/ratings", a.tenantAuth(a.listRatings))
+	mux.HandleFunc("GET /v1/stats/ratings", a.tenantAuth(a.ratingStats))
 	mux.HandleFunc("GET /v1/sessions", a.tenantAuth(a.listSessions))
 	mux.HandleFunc("GET /v1/sessions/{id}/messages", a.tenantAuth(a.listMessages))
 	mux.Handle("GET /", http.FileServerFS(web.FS)) // /visitor.html /agent.html

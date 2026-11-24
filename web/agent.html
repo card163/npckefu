@@ -26,10 +26,14 @@ button.d{background:#e5e7eb;color:#333}
 .b:has(img){padding:4px}
 .b img{max-width:220px;max-height:220px;display:block;border-radius:6px;cursor:zoom-in}
 .clip{cursor:pointer;font-size:20px;align-self:center;user-select:none}
+#toasts{position:fixed;top:56px;right:16px;display:flex;flex-direction:column;gap:8px;z-index:9}
+.toast{background:#1f2a44;color:#fff;padding:10px 14px;border-radius:8px;max-width:320px;box-shadow:0 4px 12px #0003;word-break:break-word}
+.toast b{color:#f5a623;letter-spacing:2px}
 .empty{margin:auto;color:#999}
 </style></head><body>
 <form id="login"><h3 style="margin:0">坐席登录</h3>
 <input id="ak" placeholder="appkey" required><input id="ac" placeholder="accid" required><input id="tk" placeholder="token" required><button>登录</button></form>
+<div id="toasts"></div>
 <div id="top" hidden><b>客服工作台 · <span id="me"></span></b><span id="st">连接中…</span></div>
 <div id="main" hidden>
   <div id="side"></div>
@@ -68,6 +72,8 @@ function on(ev){
   else if(ev.op==='msg')add(ev.message,true);
   else if(ev.op==='synced')ev.messages.forEach(m=>add(m,false));
   else if(ev.op==='typing'&&ev.session_id===cur.id){$('title').dataset.t=1;setTimeout(()=>delete $('title').dataset.t,2500);render()}
+  else if(ev.op==='rated'){const t=document.createElement('div');t.className='toast';const b=document.createElement('b');b.textContent='★'.repeat(ev.score)+'☆'.repeat(5-ev.score);
+    t.append('访客 '+ev.from+' 评价了会话 #'+ev.session_id+'：',b);if(ev.comment)t.append('  '+ev.comment);$('toasts').append(t);setTimeout(()=>t.remove(),10000)}
   else if(ev.op==='error')alert(ev.error);
 }
 function fill(b,m){ // 文本直接显示；图片消息渲染为缩略图（点击新窗口看原图）。只接受服务端规范路径 /files/<32位hex>

@@ -147,6 +147,12 @@ var schema = []string{
 	// STORAGE=db 时的文件内容（fs 模式不使用）。
 	`CREATE TABLE IF NOT EXISTS attachment_blobs(
   id CHAR(32) PRIMARY KEY, data MEDIUMBLOB NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+	// 会话评价：每个会话至多一条（主键即会话 ID）；agent_accid 为空表示仅由机器人接待。
+	`CREATE TABLE IF NOT EXISTS session_ratings(
+  session_id BIGINT PRIMARY KEY, tenant_id BIGINT NOT NULL, visitor_accid VARCHAR(64) NOT NULL,
+  agent_accid VARCHAR(64) NOT NULL DEFAULT '', score TINYINT NOT NULL, comment VARCHAR(1000) NOT NULL DEFAULT '',
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  KEY idx_tenant_time(tenant_id, created_at), KEY idx_agent_time(tenant_id, agent_accid, created_at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 	`CREATE TABLE IF NOT EXISTS faqs(
   id BIGINT AUTO_INCREMENT PRIMARY KEY, tenant_id BIGINT NOT NULL,
   question VARCHAR(512) NOT NULL, answer TEXT NOT NULL, keywords VARCHAR(512) NOT NULL DEFAULT '',
