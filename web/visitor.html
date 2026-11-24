@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>在线客服</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font:15px/1.5 -apple-system,"PingFang SC",sans-serif;background:#eef1f5;height:100vh;display:flex;justify-content:center}
+#app{width:100%;max-width:480px;background:#fff;display:flex;flex-direction:column;height:100%}
+header{padding:12px 16px;background:#2f6bff;color:#fff;display:flex;justify-content:space-between;align-items:center}
+header b{font-size:16px}#st{font-size:12px;opacity:.85}
+#list{flex:1;overflow-y:auto;padding:12px;background:#f6f7fa}
+.m{display:flex;margin:8px 0}.m.me{justify-content:flex-end}.m.sys{justify-content:center}
+.b{max-width:75%;padding:8px 12px;border-radius:12px;background:#fff;white-space:pre-wrap;word-break:break-word;box-shadow:0 1px 2px #0001}
+.me .b{background:#2f6bff;color:#fff}.sys .b{background:none;box-shadow:none;color:#888;font-size:12px}
+.who{font-size:11px;color:#999;margin:0 4px 2px}
+#bar{display:flex;gap:8px;padding:10px;border-top:1px solid #e5e7eb}
+#bar input{flex:1;padding:10px 12px;border:1px solid #d5d9e0;border-radius:20px;outline:none;font:inherit}
+button{border:0;border-radius:20px;padding:0 18px;background:#2f6bff;color:#fff;font:inherit;cursor:pointer}
+button.ghost{background:none;color:#fff;border:1px solid #fff8;padding:2px 10px;font-size:12px}
+#typing{height:18px;font-size:12px;color:#999;padding:0 16px}
+</style></head><body>
+<div id="app">
+<header><div><b>在线客服</b><div id="st">连接中…</div></div><button class="ghost" id="end">结束会话</button></header>
+<div id="list"></div><div id="typing"></div>
+<form id="bar"><input id="in" placeholder="请输入消息，输入“转人工”联系客服" autocomplete="off"><button>发送</button></form>
+</div>
+<script>
+const qs=new URLSearchParams(location.search), appkey=qs.get('appkey')||localStorage.getItem('appkey')||prompt('请输入 appkey');
+localStorage.setItem('appkey',appkey);
+const $=id=>document.getElementById(id), list=$('list');
+let ws, sid=0, lastSeq=0, seen=new Set(), retry=0, tt;
+const st=t=>$('st').textContent=t;
+
+async function creds(){
+  const k='visitor:'+appkey; let c=JSON.parse(localStorage.getItem(k)||'null');
+  if(!c){const r=await fetch('/v1/visitors/register',{method:'POST',body:JSON.stringify({app_key:appkey,name:'访客'})});
+    if(!r.ok){st('appkey 无效');throw 0} c=await r.json(); localStorage.setItem(k,JSON.stringify(c))}
+  return c;
+}
+async function connect(){
+  const c=await creds();
+  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+`/ws?appkey=${appkey}&accid=${c.accid}&token=${c.token}`);
+  ws.onopen=()=>{retry=0;st('已连接');send({op:'start'})};
+  ws.onclose=()=>{st('连接断开，重连中…');setTimeout(connect,Math.min(1000*2**retry++,15000))};
+  ws.onmessage=e=>on(JSON.parse(e.data));
+  setInterval(()=>ws.readyState===1&&send({op:'ping'}),20000);
+}
+const send=o=>ws&&ws.readyState===1&&ws.send(JSON.stringify(o));
+function on(ev){
+  switch(ev.op){
+  case 'session':
+    sid=ev.session.id;
+    if(ev.session.status==='closed'){st('会话已结束');sid=0;lastSeq=0;seen.clear();$('in').placeholder='会话已结束，发送消息可重新咨询'}
+    else{st({bot:'机器人接待中',queued:'排队等待人工…',active:'人工客服服务中'}[ev.session.status]);
+      send({op:'sync',session_id:sid,since_seq:lastSeq})}
+    break;
+  case 'msg': if(ev.message.session_id===sid) add(ev.message); break;
+  case 'synced': ev.messages.forEach(add); break;
+  case 'queue': st(ev.position>1?`排队中，前面还有 ${ev.position-1} 位`:'排队中，您是第 1 位'); break;
+  case 'typing': $('typing').textContent='客服正在输入…';clearTimeout(tt);tt=setTimeout(()=>$('typing').textContent='',2500);break;
+  case 'error': sys('发送失败：'+ev.error); break;
+  }
+}
+let rt;function markRead(){clearTimeout(rt);rt=setTimeout(()=>{if(sid&&lastSeq&&document.visibilityState==='visible')send({op:'read',session_id:sid,seq:lastSeq})},200)}
+function add(m){
+  if(seen.has(m.seq))return; seen.add(m.seq); lastSeq=Math.max(lastSeq,m.seq); markRead();
+  if(m.from_role==='system')return sys(m.body);
+  const me=m.from_role==='visitor', d=document.createElement('div'); d.className='m'+(me?' me':'');
+  const w=document.createElement('div'), b=document.createElement('div'); b.className='b'; b.textContent=m.body;
+  if(!me){const who=document.createElement('div');who.className='who';who.textContent=m.from_role==='bot'?'智能助手':'人工客服';w.append(who)}
+  w.append(b); d.append(w); list.append(d); list.scrollTop=list.scrollHeight;
+}
+function sys(t){const d=document.createElement('div');d.className='m sys';const b=document.createElement('div');b.className='b';b.textContent=t;d.append(b);list.append(d);list.scrollTop=list.scrollHeight}
+$('bar').onsubmit=e=>{e.preventDefault();const v=$('in').value.trim();if(!v)return;
+  if(!sid){send({op:'start'});return sys('正在开始新会话，请重新发送')}
+  send({op:'send',session_id:sid,client_msg_id:crypto.randomUUID(),type:'text',body:v});$('in').value=''};
+$('in').oninput=()=>sid&&send({op:'typing',session_id:sid});
+$('end').onclick=()=>sid&&confirm('确定结束会话？')&&send({op:'close',session_id:sid});
+connect();
+</script></body></html>
