@@ -6,11 +6,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"npckefu/internal/api"
 	"npckefu/internal/bot"
+	"npckefu/internal/cluster"
 	"npckefu/internal/im"
 	"npckefu/internal/store"
 	"npckefu/internal/webhook"
@@ -35,12 +39,28 @@ func main() {
 		llm = &bot.LLM{BaseURL: env("LLM_BASE_URL", "https://api.openai.com/v1"), APIKey: key, Model: env("LLM_MODEL", "gpt-4o-mini")}
 		log.Println("LLM enabled:", llm.Model)
 	}
-	svc := im.NewService(st, bot.New(st, llm))
+	// 多实例：设置 REDIS_ADDR 即启用（在线状态/跨节点投递/分布式锁走 Redis）；不设置则为单实例模式。
+	var cl cluster.Cluster
+	ready := []func(context.Context) error{st.Ping}
+	if addr := os.Getenv("REDIS_ADDR"); addr != "" {
+		db, _ := strconv.Atoi(os.Getenv("REDIS_DB"))
+		rc, err := cluster.NewRedis(&redis.Options{Addr: addr, Password: os.Getenv("REDIS_PASSWORD"), DB: db}, os.Getenv("NODE_ID"))
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer rc.Close()
+		cl, ready = rc, append(ready, rc.Ping)
+		log.Printf("cluster mode: node=%s redis=%s", rc.NodeID(), addr)
+	} else {
+		log.Println("single-instance mode (set REDIS_ADDR to run multiple instances)")
+	}
+	svc := im.NewService(st, bot.New(st, llm), cl)
 	allowPrivate := os.Getenv("WEBHOOK_ALLOW_PRIVATE") == "1" // 仅本地开发
-	a := &api.API{St: st, IM: svc, AdminToken: os.Getenv("ADMIN_TOKEN"), AllowPrivateWebhook: allowPrivate}
-	wctx, stopWebhook := context.WithCancel(context.Background())
-	defer stopWebhook()
-	go webhook.New(st, allowPrivate).Run(wctx)
+	a := &api.API{St: st, IM: svc, AdminToken: os.Getenv("ADMIN_TOKEN"), AllowPrivateWebhook: allowPrivate, Ready: ready}
+	runCtx, stopRun := context.WithCancel(context.Background())
+	defer stopRun()
+	go svc.Run(runCtx)
+	go webhook.New(st, allowPrivate).Run(runCtx)
 	if a.AdminToken == "" {
 		log.Println("warning: ADMIN_TOKEN not set; tenant creation disabled")
 	}
@@ -58,9 +78,13 @@ func main() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
+	// 优雅停机：先停止接收新连接，再主动断开 WebSocket（客户端会自动重连到其他节点），最后停后台任务。
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(ctx)
+	svc.Shutdown()
+	time.Sleep(500 * time.Millisecond) // 留时间让各连接完成注销
+	stopRun()
 }
 
 // seedDemo 创建演示租户/坐席/FAQ，并打印登录信息（仅本地体验用）。

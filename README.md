@@ -10,6 +10,26 @@
     # 可选 LLM（OpenAI 兼容）：LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
     TEST_MYSQL_DSN='root:@tcp(127.0.0.1:3306)/npckefu_test' go test -race ./...   # 未设置则跳过需要数据库的测试
 
+## 多实例部署
+设置 `REDIS_ADDR`（可选 `REDIS_PASSWORD` / `REDIS_DB` / `NODE_ID`）即启用集群模式；不设置则为单实例模式，行为与之前一致。所有实例共用同一个 MySQL 和 Redis，前面放负载均衡（WebSocket 无需会话保持）。
+
+    docker compose up -d       # mysql + redis
+    REDIS_ADDR=127.0.0.1:6379 NODE_ID=n1 ADDR=:8081 go run ./cmd/server
+    REDIS_ADDR=127.0.0.1:6379 NODE_ID=n2 ADDR=:8082 go run ./cmd/server
+
+| 能力 | 单实例问题 | 多实例做法 |
+|---|---|---|
+| 在线状态 | 只存在进程内 | Redis ZSET，每连接一项（`节点\|连接ID`），分数为过期时间（取 Redis 服务器时间，无时钟偏差）；节点每 10s 心跳续期，崩溃后最多 30s 失效 |
+| 跨节点投递 | 只能推给本进程的连接 | 发送方查账号所在节点，经 Redis pub/sub（每节点一个频道）转发；断线客户端仍靠 `seq` 补拉，不依赖投递必达 |
+| 坐席分配 | 进程内互斥锁 | Redis 分布式锁（带 TTL）；另有兜底扫描（每 5s，全局只有一个节点执行），拿不到锁时漏掉的排队会话会被补上 |
+| 在线/离线事件 | 进程内去重 | Redis 里的“已宣告”标记，跨节点只发一次（含 10s 宽限期） |
+| 推送合并 | 进程内计时 | Redis `SET NX PX` |
+| 回调投递 | — | 已是 MySQL `SKIP LOCKED`，天然多实例 |
+
+- `GET /readyz`：检查 MySQL（及 Redis），供负载均衡/K8s 就绪探针；`/healthz` 仅表示进程存活。
+- 优雅停机（SIGTERM）：先停止接收新连接，再以 close code 1001 主动断开所有 WebSocket，客户端自动重连到其他节点；在线状态立即正确。
+- 每个进程的 `NODE_ID` 必须唯一（默认 主机名+随机串）。Redis 故障时（按代码行为说明，**未做故障注入测试**）：同一节点上的访客与坐席仍能互发消息，在线状态回退为只看本节点，跨节点投递中断；**坐席分配会暂停**（分布式锁拿不到即放弃，宁可不分配也不超配），Redis 恢复后心跳会重新登记连接、分配自动继续。
+
 ## 前端（内嵌，无需构建）
     SEED_DEMO=1 go run ./cmd/server     # 启动日志会打印演示租户的访客链接与坐席 token
 - 访客：`/visitor.html?appkey=<appkey>`　坐席工作台：`/agent.html`（填 appkey/accid/token）
@@ -39,7 +59,7 @@
 - 在线 = 账号至少有一个 WebSocket 连接（多端同时在线时 `connections` > 1）；`last_seen_at` 是最后一次**断开**的时间，在线时不返回。
 - `GET /v1/accounts?role=agent` 的每项也带 `online`，可直接用于坐席管理页。
 - `presence.changed` 回调：`{accid, role, online, at(ms)}`。上线立即发；**下线要等 10 秒宽限期**，期间重连则不发（页面刷新、网络抖动不会刷屏）。
-- ⚠️ 在线状态来自进程内连接表，**只有单实例部署时才准确**；多实例前需把连接表/心跳放到共享存储（Redis 等）。
+- 多实例下在线状态是**全局**的（见“多实例部署”）。
 
 ## 敏感词过滤
 访客/坐席发送的**文本**消息在落库前过滤（机器人回复与服务端下发的消息不过滤）：
@@ -70,8 +90,7 @@
 cmd/server 入口 · internal/store 持久化 · internal/bot FAQ+LLM 应答 · internal/im 会话/路由/WS 网关 · internal/api REST
 
 ## 已知限制 / 下一步
-- 单机内存 Hub；多实例需 Redis/NATS 做跨节点推送与在线状态。
 - 存储为 MySQL 8（InnoDB/utf8mb4）；表结构在 store.schema 中自动创建，后续演进建议改用 golang-migrate 等迁移工具。
-- 分配坐席的互斥锁是进程内的；多实例部署前需改为分布式锁（如 MySQL GET_LOCK 或 Redis）。
+- 多实例下，节点**崩溃**（非优雅停机）时，其上的连接在 30 秒 TTL 后自动失效，在线状态查询随之正确，但**不会产生** `presence.changed` 离线事件、也不更新 `last_seen_at`（没有节点观察到“断开”）。
 - 坐席掉线时其进行中会话不自动回收；缺少内置厂商推送通道、图片/语义级内容安全、会话评价、转接给指定坐席、富媒体上传、管理后台前端、限流。
 - CheckOrigin 目前放开，需按租户域名白名单。

@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"npckefu/internal/im"
 	"npckefu/internal/moderation"
@@ -23,6 +24,8 @@ type API struct {
 	AdminToken string // 平台超管令牌，用于创建租户
 	// AllowPrivateWebhook 仅开发/测试：允许回调地址指向内网/回环。
 	AllowPrivateWebhook bool
+	// Ready 就绪检查（数据库、Redis 等），供 /readyz 使用。
+	Ready []func(context.Context) error
 }
 
 type ctxKey struct{}
@@ -30,6 +33,18 @@ type ctxKey struct{}
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		for _, f := range a.Ready {
+			if err := f(ctx); err != nil {
+				log.Printf("readyz: %v", err)
+				http.Error(w, "not ready", http.StatusServiceUnavailable)
+				return
+			}
+		}
+		w.Write([]byte("ok"))
+	})
 	mux.HandleFunc("GET /ws", a.IM.ServeWS)
 
 	// 平台级

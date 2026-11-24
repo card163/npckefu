@@ -59,7 +59,7 @@ func TestWebhookNoticeRecent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	svc := im.NewService(st, bot.New(st, nil))
+	svc := im.NewService(st, bot.New(st, nil), nil)
 	a := &api.API{St: st, IM: svc, AdminToken: "adm", AllowPrivateWebhook: true}
 	srv := httptest.NewServer(a.Handler())
 	defer srv.Close()

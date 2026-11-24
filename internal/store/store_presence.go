@@ -48,3 +48,23 @@ func (s *Store) PresenceRows(ctx context.Context, tenantID int64, accids []strin
 	}
 	return out, rows.Err()
 }
+
+// TenantsWithQueued 返回当前有排队会话的租户（供分配兜底扫描）。
+func (s *Store) TenantsWithQueued(ctx context.Context) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT tenant_id FROM sessions WHERE status='queued'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }

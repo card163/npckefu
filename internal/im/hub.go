@@ -2,7 +2,9 @@ package im
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"npckefu/internal/cluster"
 	"npckefu/internal/store"
 )
 
@@ -31,62 +34,99 @@ type Event struct {
 }
 
 type Conn struct {
+	id   string
 	ws   *websocket.Conn
 	acc  *store.Account
 	send chan []byte
 }
 
+// Hub 管理本进程的连接，并借助 cluster 提供全局在线状态与跨节点投递。
 type Hub struct {
+	cl    cluster.Cluster
 	mu    sync.RWMutex
 	conns map[string]map[*Conn]struct{} // key: tenantID/accid（同账号多端在线）
 }
 
-func NewHub() *Hub { return &Hub{conns: map[string]map[*Conn]struct{}{}} }
+func NewHub(cl cluster.Cluster) *Hub {
+	return &Hub{cl: cl, conns: map[string]map[*Conn]struct{}{}}
+}
 
 func key(t int64, accid string) string { return fmt.Sprintf("%d/%s", t, accid) }
 
-// add 注册连接，返回是否为该账号的第一个连接。
+func opCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 2*time.Second)
+}
+
+// add 注册连接，返回该账号在**全局**范围内是否第一次上线。
 func (h *Hub) add(c *Conn) (first bool) {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	c.id = hex.EncodeToString(b)
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	k := key(c.acc.TenantID, c.acc.Accid)
 	if h.conns[k] == nil {
 		h.conns[k] = map[*Conn]struct{}{}
 	}
-	first = len(h.conns[k]) == 0
+	localFirst := len(h.conns[k]) == 0
 	h.conns[k][c] = struct{}{}
+	h.mu.Unlock()
+	ctx, cancel := opCtx()
+	defer cancel()
+	first, err := h.cl.Add(ctx, c.acc.TenantID, c.acc.Accid, c.id)
+	if err != nil {
+		log.Printf("cluster add: %v", err)
+		return localFirst
+	}
 	return first
 }
 
-// remove 注销连接，返回是否已是该账号的最后一个连接。
+// remove 注销连接，返回该账号是否已在全局范围内下线。
 func (h *Hub) remove(c *Conn) (last bool) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	k := key(c.acc.TenantID, c.acc.Accid)
 	delete(h.conns[k], c)
-	if len(h.conns[k]) == 0 {
+	localLast := len(h.conns[k]) == 0
+	if localLast {
 		delete(h.conns, k)
-		return true
 	}
-	return false
+	h.mu.Unlock()
+	ctx, cancel := opCtx()
+	defer cancel()
+	last, err := h.cl.Remove(ctx, c.acc.TenantID, c.acc.Accid, c.id)
+	if err != nil {
+		log.Printf("cluster remove: %v", err)
+		return localLast
+	}
+	return last
 }
 
-// Count 返回账号当前在线连接数（多端同时在线）。
-func (h *Hub) Count(t int64, accid string) int {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return len(h.conns[key(t, accid)])
-}
-
-func (h *Hub) Online(t int64, accid string) bool {
+func (h *Hub) hasLocal(t int64, accid string) bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return len(h.conns[key(t, accid)]) > 0
 }
 
-// Push 向账号的所有在线端推送；离线则靠 Sync 补拉。
-func (h *Hub) Push(t int64, accid string, ev Event) {
-	b, _ := json.Marshal(ev)
+// Count 返回账号在所有节点上的在线连接数（多端同时在线）。
+func (h *Hub) Count(t int64, accid string) int {
+	ctx, cancel := opCtx()
+	defer cancel()
+	m, err := h.cl.Members(ctx, t, accid)
+	if err != nil {
+		log.Printf("cluster members: %v", err)
+		h.mu.RLock()
+		defer h.mu.RUnlock()
+		return len(h.conns[key(t, accid)])
+	}
+	return len(m)
+}
+
+// Online 账号在任一节点有连接即为在线。本地有连接时无需访问共享存储。
+func (h *Hub) Online(t int64, accid string) bool {
+	return h.hasLocal(t, accid) || h.Count(t, accid) > 0
+}
+
+// pushLocal 投递给本进程上的该账号连接。
+func (h *Hub) pushLocal(t int64, accid string, b []byte) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for c := range h.conns[key(t, accid)] {
@@ -94,6 +134,78 @@ func (h *Hub) Push(t int64, accid string, ev Event) {
 		case c.send <- b:
 		default: // 慢连接：丢弃，客户端靠 seq 缺口同步
 		}
+	}
+}
+
+type remoteEnvelope struct {
+	T int64           `json:"t"`
+	A string          `json:"a"`
+	E json.RawMessage `json:"e"`
+}
+
+// Push 向账号的所有在线端推送（含其他节点上的连接）；离线则靠 Sync 补拉。
+func (h *Hub) Push(t int64, accid string, ev Event) {
+	b, _ := json.Marshal(ev)
+	h.pushLocal(t, accid, b)
+	ctx, cancel := opCtx()
+	defer cancel()
+	members, err := h.cl.Members(ctx, t, accid)
+	if err != nil {
+		log.Printf("cluster members: %v", err)
+		return
+	}
+	self, sent := h.cl.NodeID(), map[string]bool{}
+	var env []byte
+	for _, m := range members {
+		n := cluster.NodeOf(m)
+		if n == self || sent[n] {
+			continue
+		}
+		sent[n] = true
+		if env == nil {
+			env, _ = json.Marshal(remoteEnvelope{T: t, A: accid, E: b})
+		}
+		if err := h.cl.Publish(ctx, n, env); err != nil {
+			log.Printf("cluster publish to %s: %v", n, err)
+		}
+	}
+}
+
+func (h *Hub) onRemote(payload []byte) {
+	var e remoteEnvelope
+	if json.Unmarshal(payload, &e) == nil {
+		h.pushLocal(e.T, e.A, e.E)
+	}
+}
+
+func (h *Hub) snapshot() []cluster.ConnRef {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	var out []cluster.ConnRef
+	for _, set := range h.conns {
+		for c := range set {
+			out = append(out, cluster.ConnRef{Tenant: c.acc.TenantID, Accid: c.acc.Accid, ConnID: c.id})
+		}
+	}
+	return out
+}
+
+// Run 运行集群后台任务（订阅跨节点消息、连接心跳），阻塞到 ctx 结束。
+func (h *Hub) Run(ctx context.Context) { h.cl.Run(ctx, h.snapshot, h.onRemote) }
+
+// CloseAll 关闭本进程所有连接（优雅停机）：客户端会自动重连到其他节点。
+func (h *Hub) CloseAll() {
+	h.mu.RLock()
+	var all []*Conn
+	for _, set := range h.conns {
+		for c := range set {
+			all = append(all, c)
+		}
+	}
+	h.mu.RUnlock()
+	for _, c := range all {
+		_ = c.ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "server restarting"), time.Now().Add(time.Second))
+		_ = c.ws.Close()
 	}
 }
 

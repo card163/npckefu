@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"log"
 	"sort"
-	"sync"
 	"time"
 
 	"npckefu/internal/bot"
+	"npckefu/internal/cluster"
 	"npckefu/internal/moderation"
 	"npckefu/internal/store"
 )
@@ -30,20 +30,52 @@ type Service struct {
 	Hub *Hub
 	Bot *bot.Bot
 	Mod *moderation.Moderator
+	Cl  cluster.Cluster // 多实例共享能力（在线状态/跨节点投递/分布式锁）；单实例用 cluster.Local
 	// PushInterval 同一会话对同一离线账号的推送最小间隔（合并推送，避免连发消息轰炸），默认 30s。
 	PushInterval time.Duration
-	mu           sync.Mutex // 串行化分配，避免超配坐席
-	pushMu       sync.Mutex
-	pushLast     map[string]time.Time
 	// PresenceGrace 账号最后一个连接断开后，等待多久仍未重连才对外宣告离线（吸收网络抖动/页面刷新），默认 10s。
 	PresenceGrace time.Duration
-	pmu           sync.Mutex
-	announced     map[string]bool // 已对外宣告"在线"的账号
+	// SweepInterval 排队分配的兜底扫描间隔（任一时刻只有一个节点执行），默认 5s。
+	SweepInterval time.Duration
 }
 
-func NewService(st *store.Store, b *bot.Bot) *Service {
-	return &Service{St: st, Hub: NewHub(), Bot: b, Mod: moderation.New(st), PushInterval: 30 * time.Second, pushLast: map[string]time.Time{}, PresenceGrace: 10 * time.Second, announced: map[string]bool{}}
+// NewService 创建服务；cl 为 nil 时使用单进程的 cluster.Local。
+func NewService(st *store.Store, b *bot.Bot, cl cluster.Cluster) *Service {
+	if cl == nil {
+		cl = cluster.NewLocal()
+	}
+	return &Service{St: st, Hub: NewHub(cl), Bot: b, Mod: moderation.New(st), Cl: cl,
+		PushInterval: 30 * time.Second, PresenceGrace: 10 * time.Second, SweepInterval: 5 * time.Second}
 }
+
+// Run 运行后台任务直到 ctx 结束：集群消息订阅与心跳、排队分配的兜底扫描。
+func (s *Service) Run(ctx context.Context) {
+	go s.Hub.Run(ctx)
+	tick := time.NewTicker(s.SweepInterval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			// 多节点同时运行时，每个周期只有一个节点执行扫描。
+			if !s.Cl.Once(ctx, "dispatch-sweep", s.SweepInterval*8/10) {
+				continue
+			}
+			ids, err := s.St.TenantsWithQueued(ctx)
+			if err != nil {
+				log.Printf("sweep: %v", err)
+				continue
+			}
+			for _, id := range ids {
+				s.Dispatch(ctx, id)
+			}
+		}
+	}
+}
+
+// Shutdown 优雅停机：断开本进程所有连接，客户端会重连到其他节点。
+func (s *Service) Shutdown() { s.Hub.CloseAll() }
 
 type SendReq struct {
 	SessionID   int64  `json:"session_id"`
@@ -196,8 +228,20 @@ func (s *Service) Transfer(ctx context.Context, sess *store.Session, skillGroup 
 
 // Dispatch 把排队会话分配给在线且未满载的坐席（技能组匹配，负载最小优先）。
 func (s *Service) Dispatch(ctx context.Context, tenantID int64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// 跨节点互斥：避免两个节点同时分配导致坐席超配。拿不到锁说明别的节点正在分配，
+	// 若恰好漏掉了刚入队的会话，由 Run 里的兜底扫描在一个周期内补上。
+	var unlock func()
+	for i := 0; ; i++ {
+		var ok bool
+		if unlock, ok = s.Cl.Lock(ctx, fmt.Sprintf("dispatch:%d", tenantID), 15*time.Second); ok {
+			break
+		}
+		if i >= 10 {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	defer unlock()
 	queued, err := s.St.QueuedSessions(ctx, tenantID)
 	if err != nil || len(queued) == 0 {
 		return
@@ -207,11 +251,15 @@ func (s *Service) Dispatch(ctx context.Context, tenantID int64) {
 		return
 	}
 	load, _ := s.St.ActiveLoad(ctx, tenantID)
+	online := map[string]bool{} // 在线状态只查一次
+	for _, a := range agents {
+		online[a.Accid] = s.Hub.Online(tenantID, a.Accid)
+	}
 	for i := range queued {
 		q := queued[i]
 		var cands []store.Account
 		for _, a := range agents {
-			if !s.Hub.Online(tenantID, a.Accid) || load[a.Accid] >= a.MaxLoad {
+			if !online[a.Accid] || load[a.Accid] >= a.MaxLoad {
 				continue
 			}
 			if q.SkillGroup != "" && a.SkillGroup != q.SkillGroup {
@@ -388,10 +436,6 @@ func (s *Service) pushOffline(sess *store.Session, m *store.Message) {
 		if to == "" || to == m.From || s.Hub.Online(sess.TenantID, to) {
 			continue
 		}
-		k := fmt.Sprintf("%d/%d/%s", sess.TenantID, sess.ID, to)
-		if !s.pushReady(k) {
-			continue
-		}
 		devs, err := s.St.DevicesOf(context.Background(), sess.TenantID, to)
 		if err != nil {
 			log.Printf("push devices: %v", err)
@@ -400,7 +444,10 @@ func (s *Service) pushOffline(sess *store.Session, m *store.Message) {
 		if len(devs) == 0 {
 			continue
 		}
-		s.pushMark(k)
+		// 跨节点合并推送：同一会话对同一账号在 PushInterval 内只推一次。
+		if !s.Cl.Once(context.Background(), fmt.Sprintf("push:%d:%d:%s", sess.TenantID, sess.ID, to), s.PushInterval) {
+			continue
+		}
 		title := "您有新的客服消息"
 		if to == sess.AgentAccid {
 			title = "访客新消息"
@@ -425,26 +472,6 @@ func previewOf(m *store.Message) string {
 	return "[新消息]"
 }
 
-func (s *Service) pushReady(k string) bool {
-	s.pushMu.Lock()
-	defer s.pushMu.Unlock()
-	t, ok := s.pushLast[k]
-	return !ok || time.Since(t) >= s.PushInterval
-}
-
-func (s *Service) pushMark(k string) {
-	s.pushMu.Lock()
-	defer s.pushMu.Unlock()
-	if len(s.pushLast) > 50000 { // 防止无限增长：清掉过期项
-		for kk, t := range s.pushLast {
-			if time.Since(t) >= s.PushInterval {
-				delete(s.pushLast, kk)
-			}
-		}
-	}
-	s.pushLast[k] = time.Now()
-}
-
 // RegisterDevice 登记推送设备（账号自己登记或租户服务端代登记）。
 func (s *Service) RegisterDevice(ctx context.Context, acc *store.Account, platform, token string) error {
 	if platform == "" || len(platform) > 16 || token == "" || len(token) > 512 {
@@ -461,33 +488,32 @@ func (s *Service) emitPresence(a *store.Account, online bool) {
 	s.emit(a.TenantID, "presence.changed", map[string]any{"accid": a.Accid, "role": a.Role, "online": online, "at": time.Now().UnixMilli()})
 }
 
-// presenceUp 账号第一个连接建立。若此前已宣告在线（上次断线仍在宽限期内），则不重复宣告。
+// presenceUp 账号在全局范围内第一次上线。"已宣告在线"标记存在共享存储里：若上次断线仍在宽限期内
+// （标记还在），不重复宣告；跨节点重连同理。
 func (s *Service) presenceUp(a *store.Account) {
-	k := presenceKey(a)
-	s.pmu.Lock()
-	already := s.announced[k]
-	s.announced[k] = true
-	s.pmu.Unlock()
-	if !already {
+	if s.Cl.Announce(context.Background(), presenceKey(a), true) {
 		s.emitPresence(a, true)
 	}
 }
 
-// presenceDown 账号最后一个连接断开：立即记录最后在线时间，宽限期后仍无连接才宣告离线。
+// presenceDown 账号在全局范围内最后一个连接断开：立即记录最后在线时间，宽限期后仍无连接才宣告离线。
+// 只有成功清除"已宣告在线"标记的那个节点会发出离线事件，不会重复。
 func (s *Service) presenceDown(a *store.Account) {
 	if err := s.St.TouchLastSeen(context.Background(), a.TenantID, a.Accid); err != nil {
 		log.Printf("last_seen: %v", err)
 	}
 	time.AfterFunc(s.PresenceGrace, func() {
-		k := presenceKey(a)
-		s.pmu.Lock()
-		// 持锁检查：与 presenceUp 配合（连接先入 Hub 再进 presenceUp），不会把已重连的账号误报离线。
-		if s.Hub.Online(a.TenantID, a.Accid) || !s.announced[k] {
-			s.pmu.Unlock()
+		ctx := context.Background()
+		if s.Hub.Online(a.TenantID, a.Accid) {
 			return
 		}
-		delete(s.announced, k)
-		s.pmu.Unlock()
+		if !s.Cl.Announce(ctx, presenceKey(a), false) {
+			return
+		}
+		if s.Hub.Online(a.TenantID, a.Accid) { // 清标记的瞬间又重连了：恢复标记，不报离线
+			s.Cl.Announce(ctx, presenceKey(a), true)
+			return
+		}
 		s.emitPresence(a, false)
 	})
 }

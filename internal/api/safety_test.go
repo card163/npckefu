@@ -42,7 +42,7 @@ func newEnv(t *testing.T) *env {
 	}
 	t.Cleanup(func() { st.Close() })
 	e := &env{st: st}
-	e.svc = im.NewService(st, bot.New(st, nil))
+	e.svc = im.NewService(st, bot.New(st, nil), nil)
 	e.svc.PushInterval = time.Hour
 	e.svc.PresenceGrace = 300 * time.Millisecond
 	a := &api.API{St: st, IM: e.svc, AdminToken: "adm", AllowPrivateWebhook: true}

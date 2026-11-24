@@ -73,7 +73,7 @@ func TestFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	svc := im.NewService(st, bot.New(st, nil))
+	svc := im.NewService(st, bot.New(st, nil), nil)
 	a := &api.API{St: st, IM: svc, AdminToken: "adm"}
 	srv := httptest.NewServer(a.Handler())
 	defer srv.Close()
