@@ -9,8 +9,10 @@ import (
 	"log"
 	"sort"
 	"sync"
+	"time"
 
 	"npckefu/internal/bot"
+	"npckefu/internal/moderation"
 	"npckefu/internal/store"
 )
 
@@ -18,6 +20,7 @@ var (
 	ErrForbidden = errors.New("forbidden")
 	ErrClosed    = errors.New("session closed")
 	ErrBadInput  = errors.New("bad input")
+	ErrSensitive = errors.New("消息包含违规内容，未发送")
 )
 
 const maxBotMisses = 2 // 连续未命中 N 次后自动转人工
@@ -26,11 +29,16 @@ type Service struct {
 	St  *store.Store
 	Hub *Hub
 	Bot *bot.Bot
-	mu  sync.Mutex // 串行化分配，避免超配坐席
+	Mod *moderation.Moderator
+	// PushInterval 同一会话对同一离线账号的推送最小间隔（合并推送，避免连发消息轰炸），默认 30s。
+	PushInterval time.Duration
+	mu           sync.Mutex // 串行化分配，避免超配坐席
+	pushMu       sync.Mutex
+	pushLast     map[string]time.Time
 }
 
 func NewService(st *store.Store, b *bot.Bot) *Service {
-	return &Service{St: st, Hub: NewHub(), Bot: b}
+	return &Service{St: st, Hub: NewHub(), Bot: b, Mod: moderation.New(st), PushInterval: 30 * time.Second, pushLast: map[string]time.Time{}}
 }
 
 type SendReq struct {
@@ -109,6 +117,21 @@ func (s *Service) Send(ctx context.Context, acc *store.Account, in SendReq) (*st
 		}
 	default:
 		return nil, ErrForbidden
+	}
+	if in.Type == "text" { // 敏感词：屏蔽则改写正文，拒绝则不落库
+		if r := s.Mod.Check(ctx, acc.TenantID, in.Body); r.Hit {
+			action := "masked"
+			if r.Block {
+				action = "blocked"
+			}
+			s.emit(acc.TenantID, "message.moderated", map[string]any{
+				"session_id": sess.ID, "from": acc.Accid, "action": action, "words": r.Words,
+			})
+			if r.Block {
+				return nil, ErrSensitive
+			}
+			in.Body = r.Text
+		}
 	}
 	m, dup, err := s.St.AppendMessage(ctx, &store.Message{
 		TenantID: acc.TenantID, SessionID: sess.ID, ClientMsgID: in.ClientMsgID,
@@ -267,6 +290,7 @@ func (s *Service) systemMsg(ctx context.Context, sess *store.Session, role, text
 
 func (s *Service) deliver(sess *store.Session, m *store.Message) {
 	s.emit(sess.TenantID, "message.created", map[string]any{"session": sess, "message": m})
+	s.pushOffline(sess, m)
 	ev := Event{Op: "msg", Message: m}
 	s.Hub.Push(sess.TenantID, sess.VisitorAccid, ev)
 	if sess.AgentAccid != "" {
@@ -348,4 +372,79 @@ func (s *Service) SendNotice(ctx context.Context, tenantID, sessionID int64, to 
 		s.deliver(sess, m)
 	}
 	return m, nil
+}
+
+// pushOffline 收件人不在线且登记了设备时，产出 push.offline 事件（经回调发件箱交给租户服务器转发到
+// APNs/厂商通道/FCM）。同一会话对同一账号在 PushInterval 内只推一次。内部系统消息不推送。
+func (s *Service) pushOffline(sess *store.Session, m *store.Message) {
+	if m.From == "system" {
+		return
+	}
+	for _, to := range []string{sess.VisitorAccid, sess.AgentAccid} {
+		if to == "" || to == m.From || s.Hub.Online(sess.TenantID, to) {
+			continue
+		}
+		k := fmt.Sprintf("%d/%d/%s", sess.TenantID, sess.ID, to)
+		if !s.pushReady(k) {
+			continue
+		}
+		devs, err := s.St.DevicesOf(context.Background(), sess.TenantID, to)
+		if err != nil {
+			log.Printf("push devices: %v", err)
+			continue
+		}
+		if len(devs) == 0 {
+			continue
+		}
+		s.pushMark(k)
+		title := "您有新的客服消息"
+		if to == sess.AgentAccid {
+			title = "访客新消息"
+		}
+		s.emit(sess.TenantID, "push.offline", map[string]any{
+			"accid": to, "session_id": sess.ID, "seq": m.Seq, "title": title, "body": previewOf(m), "devices": devs,
+		})
+	}
+}
+
+func previewOf(m *store.Message) string {
+	switch m.Type {
+	case "text":
+		r := []rune(m.Body)
+		if len(r) > 50 {
+			r = r[:50]
+		}
+		return string(r)
+	case "image":
+		return "[图片]"
+	}
+	return "[新消息]"
+}
+
+func (s *Service) pushReady(k string) bool {
+	s.pushMu.Lock()
+	defer s.pushMu.Unlock()
+	t, ok := s.pushLast[k]
+	return !ok || time.Since(t) >= s.PushInterval
+}
+
+func (s *Service) pushMark(k string) {
+	s.pushMu.Lock()
+	defer s.pushMu.Unlock()
+	if len(s.pushLast) > 50000 { // 防止无限增长：清掉过期项
+		for kk, t := range s.pushLast {
+			if time.Since(t) >= s.PushInterval {
+				delete(s.pushLast, kk)
+			}
+		}
+	}
+	s.pushLast[k] = time.Now()
+}
+
+// RegisterDevice 登记推送设备（账号自己登记或租户服务端代登记）。
+func (s *Service) RegisterDevice(ctx context.Context, acc *store.Account, platform, token string) error {
+	if platform == "" || len(platform) > 16 || token == "" || len(token) > 512 {
+		return ErrBadInput
+	}
+	return s.St.UpsertDevice(ctx, acc.TenantID, acc.Accid, platform, token)
 }

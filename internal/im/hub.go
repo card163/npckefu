@@ -98,6 +98,8 @@ type inbound struct {
 	Since         int64  `json:"since_seq"`
 	Seq           int64  `json:"seq"`
 	IncludeClosed bool   `json:"include_closed"`
+	Platform      string `json:"platform"`
+	Token         string `json:"token"`
 }
 
 // ServeWS 登录鉴权：?appkey=&accid=&token=（token 由租户服务端通过注册接口下发）。
@@ -192,7 +194,7 @@ func (s *Service) handle(c *Conn, in inbound) {
 		}
 	}
 	fail := func(err error) {
-		if !errors.Is(err, ErrForbidden) && !errors.Is(err, ErrBadInput) && !errors.Is(err, ErrClosed) && !errors.Is(err, store.ErrNotFound) {
+		if !errors.Is(err, ErrForbidden) && !errors.Is(err, ErrBadInput) && !errors.Is(err, ErrClosed) && !errors.Is(err, ErrSensitive) && !errors.Is(err, store.ErrNotFound) {
 			log.Printf("ws op=%s: %v", in.Op, err)
 			err = errors.New("internal error")
 		}
@@ -228,6 +230,10 @@ func (s *Service) handle(c *Conn, in inbound) {
 			return
 		}
 		reply(Event{Op: "recent", Recent: items})
+	case "device": // 客户端登记/更新自己的推送 token
+		if err := s.RegisterDevice(ctx, c.acc, in.Platform, in.Token); err != nil {
+			fail(err)
+		}
 	case "read":
 		if err := s.MarkRead(ctx, c.acc, in.SessionID, in.Seq); err != nil {
 			fail(err)

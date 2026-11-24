@@ -11,6 +11,7 @@ import (
 	"strconv"
 
 	"npckefu/internal/im"
+	"npckefu/internal/moderation"
 	"npckefu/internal/store"
 	"npckefu/internal/webhook"
 	"npckefu/web"
@@ -48,6 +49,11 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/webhook", a.tenantAuth(a.deleteWebhook))
 	mux.HandleFunc("POST /v1/messages", a.tenantAuth(a.sendMessage))
 	mux.HandleFunc("GET /v1/accounts/{accid}/recent", a.tenantAuth(a.recent))
+	mux.HandleFunc("PUT /v1/accounts/{accid}/devices", a.tenantAuth(a.putDevice))
+	mux.HandleFunc("DELETE /v1/accounts/{accid}/devices/{token}", a.tenantAuth(a.deleteDevice))
+	mux.HandleFunc("POST /v1/sensitive-words", a.tenantAuth(a.addWords))
+	mux.HandleFunc("GET /v1/sensitive-words", a.tenantAuth(a.listWords))
+	mux.HandleFunc("DELETE /v1/sensitive-words/{id}", a.tenantAuth(a.deleteWord))
 	mux.HandleFunc("GET /v1/sessions", a.tenantAuth(a.listSessions))
 	mux.HandleFunc("GET /v1/sessions/{id}/messages", a.tenantAuth(a.listMessages))
 	mux.Handle("GET /", http.FileServerFS(web.FS)) // /visitor.html /agent.html
@@ -250,6 +256,94 @@ func (a *API) recent(w http.ResponseWriter, r *http.Request, t *store.Tenant) {
 		v = []store.RecentItem{}
 	}
 	respondObj(w, v, err)
+}
+
+func (a *API) putDevice(w http.ResponseWriter, r *http.Request, t *store.Tenant) {
+	var in struct{ Platform, Token string }
+	if !decode(w, r, &in) {
+		return
+	}
+	acc, err := a.St.Account(r.Context(), t.ID, r.PathValue("accid"))
+	if err != nil {
+		serverErr(w, err)
+		return
+	}
+	if err := a.IM.RegisterDevice(r.Context(), acc, in.Platform, in.Token); err != nil {
+		if errors.Is(err, im.ErrBadInput) {
+			writeErr(w, http.StatusBadRequest, "platform (<=16) and token (<=512) required")
+			return
+		}
+		serverErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) deleteDevice(w http.ResponseWriter, r *http.Request, t *store.Tenant) {
+	if err := a.St.DeleteDevice(r.Context(), t.ID, r.PathValue("accid"), r.PathValue("token")); err != nil {
+		serverErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// addWords 批量添加敏感词：{"words":["…"],"action":"mask|block"}（默认 mask）。已存在的词会更新 action。
+func (a *API) addWords(w http.ResponseWriter, r *http.Request, t *store.Tenant) {
+	var in struct {
+		Words  []string `json:"words"`
+		Action string   `json:"action"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	if in.Action == "" {
+		in.Action = moderation.ActionMask
+	}
+	if (in.Action != moderation.ActionMask && in.Action != moderation.ActionBlock) || len(in.Words) == 0 || len(in.Words) > 1000 {
+		writeErr(w, http.StatusBadRequest, "words (1-1000) required; action must be mask|block")
+		return
+	}
+	for _, x := range in.Words {
+		if len(x) > 128 || !moderation.ValidWord(x) {
+			writeErr(w, http.StatusBadRequest, "each word needs at least 2 letters/digits/characters (and <=128 bytes): "+x)
+			return
+		}
+	}
+	n, err := a.St.CountSensitiveWords(r.Context(), t.ID)
+	if err != nil {
+		serverErr(w, err)
+		return
+	}
+	if n+len(in.Words) > store.MaxSensitiveWords {
+		writeErr(w, http.StatusConflict, "sensitive word limit reached")
+		return
+	}
+	affected, err := a.St.AddSensitiveWords(r.Context(), t.ID, in.Words, in.Action)
+	a.IM.Mod.Invalidate(t.ID)
+	if err != nil {
+		serverErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int64{"affected": affected})
+}
+
+func (a *API) listWords(w http.ResponseWriter, r *http.Request, t *store.Tenant) {
+	v, err := a.St.ListSensitiveWords(r.Context(), t.ID)
+	if err == nil && v == nil {
+		v = []store.SensitiveWord{}
+	}
+	respondObj(w, v, err)
+}
+
+func (a *API) deleteWord(w http.ResponseWriter, r *http.Request, t *store.Tenant) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	err := a.St.DeleteSensitiveWord(r.Context(), t.ID, id)
+	a.IM.Mod.Invalidate(t.ID)
+	if err != nil {
+		serverErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func respondObj(w http.ResponseWriter, v any, err error) {

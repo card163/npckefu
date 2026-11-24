@@ -128,6 +128,15 @@ var schema = []string{
   next_at DATETIME(3) NOT NULL, last_error VARCHAR(255) NOT NULL DEFAULT '',
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   KEY idx_due(status, next_at, id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+	`CREATE TABLE IF NOT EXISTS sensitive_words(
+  id BIGINT AUTO_INCREMENT PRIMARY KEY, tenant_id BIGINT NOT NULL,
+  word VARCHAR(128) NOT NULL, action VARCHAR(8) NOT NULL DEFAULT 'mask',
+  UNIQUE KEY uq_tenant_word(tenant_id, word)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+	// 推送设备：一个 token 同一时刻只属于一个账号（同机换账号登录时转移）。
+	`CREATE TABLE IF NOT EXISTS push_devices(
+  tenant_id BIGINT NOT NULL, token VARCHAR(512) NOT NULL, accid VARCHAR(64) NOT NULL, platform VARCHAR(16) NOT NULL,
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY(tenant_id, token), KEY idx_accid(tenant_id, accid)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 	`CREATE TABLE IF NOT EXISTS faqs(
   id BIGINT AUTO_INCREMENT PRIMARY KEY, tenant_id BIGINT NOT NULL,
   question VARCHAR(512) NOT NULL, answer TEXT NOT NULL, keywords VARCHAR(512) NOT NULL DEFAULT '',
