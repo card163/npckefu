@@ -46,6 +46,8 @@
 | GET /v1/accounts/{accid}/presence | 租户 | 在线状态：`{online, connections(同时在线端数), last_seen_at(离线时)}`，账号不存在返回 404 |
 | POST /v1/presence | 租户 | 批量查询 `{accids:[…≤100]}`，按输入顺序返回，不存在的 `exists:false` |
 | GET /v1/accounts/{accid}/recent?include_closed=1 | 租户 | 该账号的最近会话（最后消息预览、未读数），按最后活动时间倒序 |
+| POST /v1/upload | 账号 `X-App-Key`+`X-Accid`+`X-Token`，或租户 `X-App-Key`+`X-App-Secret` | 上传图片（multipart，字段 `file`），返回 `{file_id,url,width,height,size,mime}` |
+| GET /files/{id} | 无（持有链接） | 读取图片 |
 | PUT/GET/DELETE /v1/webhook | 租户 | 配置消息回调地址；PUT `{url, rotate_secret?}` 返回签名密钥 `secret` |
 | POST/GET /v1/sensitive-words, DELETE /v1/sensitive-words/{id} | 租户 | 敏感词库：POST `{words:[…], action:"mask"\|"block"}`（单词≥2字，每租户≤5000） |
 | PUT /v1/accounts/{accid}/devices, DELETE …/devices/{token} | 租户 | 登记/删除推送设备 `{platform, token}`（也可由客户端经 WS `device` 自行登记） |
@@ -54,6 +56,15 @@
 客户端 → 服务端 `op`: `start`(访客开始咨询) · `send`{session_id,client_msg_id,type,body} · `sync`{session_id,since_seq} · `close` · `typing` · `ping`
 客户端另有：`recent`{include_closed}（最近会话+未读）· `read`{session_id,seq}（推进已读游标，不会超过最新 seq，并同步给同账号其他端）
 服务端 → 客户端 `op`: `session` · `msg` · `ack` · `queue`{position} · `synced` · `recent` · `read` · `typing` · `error`
+
+## 图片
+1. `POST /v1/upload` 上传，拿到 `file_id`；2. 发送 `{"op":"send","session_id":…,"type":"image","body":"{\"file_id\":\"…\"}"}`（租户服务端用 `POST /v1/messages`，同样 `type:"image"`）；3. 收到的消息 `type:"image"`，`body` 是服务端生成的 JSON：`{file_id,url:"/files/<id>",width,height,size,mime}`，客户端用 `url` 渲染（内置两个页面已支持：📎 选图、粘贴图片、点击看原图）。
+- **校验**：按文件**内容**判断类型，只允许 JPEG/PNG/GIF/WebP（拒绝 SVG/HTML 等可含脚本的格式、伪造扩展名的文件）；≤5MB，单边≤10000px、总像素≤5000 万（防“解压炸弹”，只读图片头，不解码整图）；每个账号每分钟最多上传 30 次（超出 429）。
+- **只能引用自己的上传**：图片消息的 `file_id` 必须是**本人**上传、同租户、且未被绑定到别的会话；正文由服务端重写，客户端无法塞入外链或他人文件。
+- **读取**：文件 ID 是 128 位随机数，充当持有链接（`<img>` 带不了认证头）；响应带 `nosniff`、`CSP: sandbox`，内容不可变可长期缓存。**知道链接的人都能看**，这与多数 IM 的做法一致；需要更严格的访问控制时，应改为带过期时间的签名链接。
+- **清理**：上传后 24 小时内未被任何消息引用的文件会被定期删除（多实例下每小时只有一个节点执行）；**已发送的图片目前不会自动过期**。
+- **存储** `STORAGE=db`（默认，存 MySQL，多实例开箱即用，适合中小规模；MySQL 的 `max_allowed_packet` 需≥8MB，8.0 默认 64MB）｜`fs`（`UPLOAD_DIR`，多实例必须是共享卷）｜`off`（关闭图片功能，接口返回 404）。对象存储（S3/OSS/COS）未内置：实现 `files.Storage` 接口即可。
+- 图片消息不做敏感词过滤，也不做图片内容审核；不会剥离 JPEG 的 EXIF（可能含拍摄位置），也不生成缩略图（前端按宽度缩小显示）。
 
 ## 在线状态
 - 在线 = 账号至少有一个 WebSocket 连接（多端同时在线时 `connections` > 1）；`last_seen_at` 是最后一次**断开**的时间，在线时不返回。
@@ -92,5 +103,5 @@ cmd/server 入口 · internal/store 持久化 · internal/bot FAQ+LLM 应答 · 
 ## 已知限制 / 下一步
 - 存储为 MySQL 8（InnoDB/utf8mb4）；表结构在 store.schema 中自动创建，后续演进建议改用 golang-migrate 等迁移工具。
 - 多实例下，节点**崩溃**（非优雅停机）时，其上的连接在 30 秒 TTL 后自动失效，在线状态查询随之正确，但**不会产生** `presence.changed` 离线事件、也不更新 `last_seen_at`（没有节点观察到“断开”）。
-- 坐席掉线时其进行中会话不自动回收；缺少内置厂商推送通道、图片/语义级内容安全、会话评价、转接给指定坐席、富媒体上传、管理后台前端、限流。
+- 坐席掉线时其进行中会话不自动回收；缺少内置厂商推送通道、图片内容审核、对象存储、会话评价、转接给指定坐席、语音/视频/文件消息、管理后台前端、全局接口限流（目前只有上传限流）。
 - CheckOrigin 目前放开，需按租户域名白名单。

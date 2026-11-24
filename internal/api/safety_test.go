@@ -15,6 +15,7 @@ import (
 
 	"npckefu/internal/api"
 	"npckefu/internal/bot"
+	"npckefu/internal/files"
 	"npckefu/internal/im"
 	"npckefu/internal/store"
 	"npckefu/internal/webhook"
@@ -30,7 +31,10 @@ type env struct {
 	events []map[string]any // 回调收到的事件 envelope
 }
 
-func newEnv(t *testing.T) *env {
+func newEnv(t *testing.T) *env { return newEnvWith(t, nil) }
+
+// newEnvWith 允许在服务启动前调整 Service（如替换图片存储），避免启动后修改字段。
+func newEnvWith(t *testing.T, tweak func(*im.Service)) *env {
 	t.Helper()
 	dsn := os.Getenv("TEST_MYSQL_DSN")
 	if dsn == "" {
@@ -45,6 +49,10 @@ func newEnv(t *testing.T) *env {
 	e.svc = im.NewService(st, bot.New(st, nil), nil)
 	e.svc.PushInterval = time.Hour
 	e.svc.PresenceGrace = 300 * time.Millisecond
+	e.svc.Files = files.DB{St: st}
+	if tweak != nil {
+		tweak(e.svc)
+	}
 	a := &api.API{St: st, IM: e.svc, AdminToken: "adm", AllowPrivateWebhook: true}
 	e.srv = httptest.NewServer(a.Handler())
 	t.Cleanup(e.srv.Close)

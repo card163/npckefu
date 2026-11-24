@@ -6,11 +6,13 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
 	"time"
 
+	"npckefu/internal/files"
 	"npckefu/internal/im"
 	"npckefu/internal/moderation"
 	"npckefu/internal/store"
@@ -52,6 +54,10 @@ func (a *API) Handler() http.Handler {
 
 	// 访客自助注册（只需 appkey，客户端可直接调用；生产请加限流/人机校验）
 	mux.HandleFunc("POST /v1/visitors/register", a.registerVisitor)
+
+	// 图片：上传（账号凭 X-App-Key+X-Accid+X-Token，或租户服务端凭 X-App-Key+X-App-Secret）与读取（持有链接）
+	mux.HandleFunc("POST /v1/upload", a.upload)
+	mux.HandleFunc("GET /files/{id}", a.serveFile)
 
 	// 租户服务端接口（X-App-Key + X-App-Secret）
 	mux.HandleFunc("POST /v1/accounts", a.tenantAuth(a.upsertAccount))
@@ -263,6 +269,8 @@ func (a *API) sendMessage(w http.ResponseWriter, r *http.Request, t *store.Tenan
 	switch {
 	case err == nil:
 		writeJSON(w, http.StatusOK, m)
+	case errors.Is(err, im.ErrBadFile):
+		writeErr(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, im.ErrBadInput):
 		writeErr(w, http.StatusBadRequest, "need body (<=8192B, type text|image|custom) and session_id or visitor accid in 'to'")
 	case errors.Is(err, im.ErrClosed):
@@ -402,6 +410,128 @@ func (a *API) presenceBatch(w http.ResponseWriter, r *http.Request, t *store.Ten
 	}
 	ps, err := a.IM.Presences(r.Context(), t.ID, in.Accids)
 	respondObj(w, ps, err)
+}
+
+const (
+	uploadsPerMinute = 30
+)
+
+// uploadIdentity 识别上传者：租户服务端（返回 business）或某个账号（返回其 accid）。
+func (a *API) uploadIdentity(r *http.Request) (tenantID int64, uploader string, ok bool) {
+	t, err := a.St.TenantByAppKey(r.Context(), r.Header.Get("X-App-Key"))
+	if err != nil {
+		return 0, "", false
+	}
+	if sec := r.Header.Get("X-App-Secret"); sec != "" {
+		if subtle.ConstantTimeCompare([]byte(t.AppSecret), []byte(sec)) != 1 {
+			return 0, "", false
+		}
+		return t.ID, im.BusinessSender, true
+	}
+	acc, err := a.St.Account(r.Context(), t.ID, r.Header.Get("X-Accid"))
+	if err != nil || subtle.ConstantTimeCompare([]byte(acc.Token), []byte(r.Header.Get("X-Token"))) != 1 {
+		return 0, "", false
+	}
+	return t.ID, acc.Accid, true
+}
+
+// upload：multipart/form-data，字段名 file。校验内容真实类型/尺寸，存储后返回 file_id，
+// 随后用 {"op":"send","type":"image","body":"{\"file_id\":\"…\"}"} 发送。
+func (a *API) upload(w http.ResponseWriter, r *http.Request) {
+	if a.IM.Files == nil {
+		writeErr(w, http.StatusNotFound, "image upload is not enabled")
+		return
+	}
+	tenantID, uploader, ok := a.uploadIdentity(r)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "invalid credentials")
+		return
+	}
+	if n, err := a.St.CountRecentUploads(r.Context(), tenantID, uploader, time.Minute); err != nil {
+		serverErr(w, err)
+		return
+	} else if n >= uploadsPerMinute {
+		w.Header().Set("Retry-After", "60")
+		writeErr(w, http.StatusTooManyRequests, "too many uploads, retry later")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, files.MaxBytes+(1<<20))
+	mr, err := r.MultipartReader()
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "multipart/form-data with a 'file' field required")
+		return
+	}
+	var data []byte
+	for {
+		part, err := mr.NextPart()
+		if err != nil {
+			break
+		}
+		if part.FormName() != "file" {
+			continue
+		}
+		data, err = io.ReadAll(io.LimitReader(part, files.MaxBytes+1))
+		if err != nil {
+			writeErr(w, http.StatusRequestEntityTooLarge, "file too large")
+			return
+		}
+		break
+	}
+	if len(data) > files.MaxBytes {
+		writeErr(w, http.StatusRequestEntityTooLarge, "file too large (max 5MB)")
+		return
+	}
+	mime, wd, ht, err := files.Inspect(data)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	att := &store.Attachment{ID: store.RandHex(16), TenantID: tenantID, Uploader: uploader, Mime: mime, Size: len(data), Width: wd, Height: ht}
+	if err := a.IM.Files.Put(r.Context(), att.ID, data); err != nil {
+		serverErr(w, err)
+		return
+	}
+	if err := a.St.InsertAttachment(r.Context(), att); err != nil {
+		_ = a.IM.Files.Delete(r.Context(), att.ID)
+		serverErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"file_id": att.ID, "url": "/files/" + att.ID, "width": wd, "height": ht, "size": att.Size, "mime": mime})
+}
+
+// serveFile：文件 ID 是 128 位随机数，充当"持有链接"（<img> 无法携带认证头）。
+// 内容不可变，可长期缓存；响应头禁止浏览器嗅探类型并沙箱化，即使有人构造了图片/脚本混合文件也无法执行。
+func (a *API) serveFile(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if a.IM.Files == nil || !files.ValidID(id) {
+		http.NotFound(w, r)
+		return
+	}
+	att, err := a.St.Attachment(r.Context(), id)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	etag := `"` + id + `"`
+	h := w.Header()
+	h.Set("ETag", etag)
+	h.Set("Cache-Control", "private, max-age=31536000, immutable")
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	rc, err := a.IM.Files.Get(r.Context(), id)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer rc.Close()
+	h.Set("Content-Type", att.Mime)
+	h.Set("Content-Length", strconv.Itoa(att.Size))
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Content-Security-Policy", "default-src 'none'; sandbox")
+	h.Set("Content-Disposition", "inline")
+	_, _ = io.Copy(w, rc)
 }
 
 func respondObj(w http.ResponseWriter, v any, err error) {

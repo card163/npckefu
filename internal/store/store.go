@@ -138,6 +138,15 @@ var schema = []string{
   tenant_id BIGINT NOT NULL, token VARCHAR(512) NOT NULL, accid VARCHAR(64) NOT NULL, platform VARCHAR(16) NOT NULL,
   updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   PRIMARY KEY(tenant_id, token), KEY idx_accid(tenant_id, accid)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+	// 图片附件元数据；session_id 为空表示已上传但尚未被任何消息引用（超时未用会被清理）。
+	`CREATE TABLE IF NOT EXISTS attachments(
+  id CHAR(32) PRIMARY KEY, tenant_id BIGINT NOT NULL, uploader VARCHAR(64) NOT NULL,
+  mime VARCHAR(32) NOT NULL, size INT NOT NULL, width INT NOT NULL, height INT NOT NULL,
+  session_id BIGINT NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  KEY idx_uploader(tenant_id, uploader, created_at), KEY idx_orphan(session_id, created_at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+	// STORAGE=db 时的文件内容（fs 模式不使用）。
+	`CREATE TABLE IF NOT EXISTS attachment_blobs(
+  id CHAR(32) PRIMARY KEY, data MEDIUMBLOB NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 	`CREATE TABLE IF NOT EXISTS faqs(
   id BIGINT AUTO_INCREMENT PRIMARY KEY, tenant_id BIGINT NOT NULL,
   question VARCHAR(512) NOT NULL, answer TEXT NOT NULL, keywords VARCHAR(512) NOT NULL DEFAULT '',

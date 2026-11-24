@@ -12,6 +12,7 @@ import (
 
 	"npckefu/internal/bot"
 	"npckefu/internal/cluster"
+	"npckefu/internal/files"
 	"npckefu/internal/moderation"
 	"npckefu/internal/store"
 )
@@ -21,16 +22,18 @@ var (
 	ErrClosed    = errors.New("session closed")
 	ErrBadInput  = errors.New("bad input")
 	ErrSensitive = errors.New("消息包含违规内容，未发送")
+	ErrBadFile   = errors.New("图片不存在或无权使用，请重新上传")
 )
 
 const maxBotMisses = 2 // 连续未命中 N 次后自动转人工
 
 type Service struct {
-	St  *store.Store
-	Hub *Hub
-	Bot *bot.Bot
-	Mod *moderation.Moderator
-	Cl  cluster.Cluster // 多实例共享能力（在线状态/跨节点投递/分布式锁）；单实例用 cluster.Local
+	St    *store.Store
+	Hub   *Hub
+	Bot   *bot.Bot
+	Mod   *moderation.Moderator
+	Files files.Storage   // 图片附件存储；nil 表示未启用图片功能
+	Cl    cluster.Cluster // 多实例共享能力（在线状态/跨节点投递/分布式锁）；单实例用 cluster.Local
 	// PushInterval 同一会话对同一离线账号的推送最小间隔（合并推送，避免连发消息轰炸），默认 30s。
 	PushInterval time.Duration
 	// PresenceGrace 账号最后一个连接断开后，等待多久仍未重连才对外宣告离线（吸收网络抖动/页面刷新），默认 10s。
@@ -53,10 +56,20 @@ func (s *Service) Run(ctx context.Context) {
 	go s.Hub.Run(ctx)
 	tick := time.NewTicker(s.SweepInterval)
 	defer tick.Stop()
+	gc := time.NewTicker(time.Hour)
+	defer gc.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-gc.C:
+			if s.Files != nil && s.Cl.Once(ctx, "attachment-gc", 55*time.Minute) {
+				if n, err := s.GCAttachments(ctx, 24*time.Hour); err != nil {
+					log.Printf("attachment gc: %v", err)
+				} else if n > 0 {
+					log.Printf("attachment gc: removed %d unused uploads", n)
+				}
+			}
 		case <-tick.C:
 			// 多节点同时运行时，每个周期只有一个节点执行扫描。
 			if !s.Cl.Once(ctx, "dispatch-sweep", s.SweepInterval*8/10) {
@@ -168,6 +181,13 @@ func (s *Service) Send(ctx context.Context, acc *store.Account, in SendReq) (*st
 			}
 			in.Body = r.Text
 		}
+	}
+	if in.Type == "image" { // 图片消息只能引用本人上传的文件，正文由服务端重写为规范 JSON
+		body, err := s.resolveImage(ctx, acc.TenantID, acc.Accid, sess.ID, in.Body)
+		if err != nil {
+			return nil, err
+		}
+		in.Body = body
 	}
 	m, dup, err := s.St.AppendMessage(ctx, &store.Message{
 		TenantID: acc.TenantID, SessionID: sess.ID, ClientMsgID: in.ClientMsgID,
@@ -413,6 +433,13 @@ func (s *Service) SendNotice(ctx context.Context, tenantID, sessionID int64, to 
 	if sess.Status == store.StatusClosed {
 		return nil, ErrClosed
 	}
+	if in.Type == "image" {
+		body, err := s.resolveImage(ctx, tenantID, BusinessSender, sess.ID, in.Body)
+		if err != nil {
+			return nil, err
+		}
+		in.Body = body
+	}
 	m, dup, err := s.St.AppendMessage(ctx, &store.Message{
 		TenantID: tenantID, SessionID: sess.ID, ClientMsgID: in.ClientMsgID,
 		From: BusinessSender, FromRole: store.RoleSystem, Type: in.Type, Body: in.Body,
@@ -548,4 +575,46 @@ func (s *Service) Presences(ctx context.Context, tenantID int64, accids []string
 		out = append(out, p)
 	}
 	return out, nil
+}
+
+// resolveImage 校验图片消息的正文 {"file_id":"…"}：文件必须由本人上传、属于本租户、且未被绑定到其他会话。
+// 通过后把附件绑定到本会话，并返回规范化正文（含访问地址与尺寸），客户端据此渲染。
+func (s *Service) resolveImage(ctx context.Context, tenantID int64, uploader string, sessionID int64, raw string) (string, error) {
+	var in struct {
+		FileID string `json:"file_id"`
+	}
+	if json.Unmarshal([]byte(raw), &in) != nil || !files.ValidID(in.FileID) {
+		return "", ErrBadFile
+	}
+	a, err := s.St.BindAttachment(ctx, tenantID, uploader, in.FileID, sessionID)
+	if errors.Is(err, store.ErrNotFound) {
+		return "", ErrBadFile
+	}
+	if err != nil {
+		return "", err
+	}
+	b, _ := json.Marshal(map[string]any{"file_id": a.ID, "url": "/files/" + a.ID, "width": a.Width, "height": a.Height, "size": a.Size, "mime": a.Mime})
+	return string(b), nil
+}
+
+// GCAttachments 删除超过 olderThan 仍未被任何消息引用的上传（防止垃圾文件无限堆积）。
+func (s *Service) GCAttachments(ctx context.Context, olderThan time.Duration) (int, error) {
+	if s.Files == nil {
+		return 0, nil
+	}
+	list, err := s.St.OrphanAttachments(ctx, olderThan, 500)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, a := range list {
+		if err := s.Files.Delete(ctx, a.ID); err != nil {
+			log.Printf("gc delete %s: %v", a.ID, err)
+			continue
+		}
+		if err := s.St.DeleteAttachment(ctx, a.ID); err == nil {
+			n++
+		}
+	}
+	return n, nil
 }

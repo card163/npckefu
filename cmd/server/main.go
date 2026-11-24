@@ -15,6 +15,7 @@ import (
 	"npckefu/internal/api"
 	"npckefu/internal/bot"
 	"npckefu/internal/cluster"
+	"npckefu/internal/files"
 	"npckefu/internal/im"
 	"npckefu/internal/store"
 	"npckefu/internal/webhook"
@@ -55,6 +56,23 @@ func main() {
 		log.Println("single-instance mode (set REDIS_ADDR to run multiple instances)")
 	}
 	svc := im.NewService(st, bot.New(st, llm), cl)
+	// 图片存储：STORAGE=db（默认，存 MySQL，多实例开箱即用）| fs（UPLOAD_DIR，多实例需共享卷）| off
+	switch env("STORAGE", "db") {
+	case "db":
+		svc.Files = files.DB{St: st}
+	case "fs":
+		dir := env("UPLOAD_DIR", "uploads")
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			log.Fatal(err)
+		}
+		svc.Files = files.FS{Dir: dir}
+		if cl != nil {
+			log.Printf("warning: STORAGE=fs with multiple instances requires %s to be a shared volume", dir)
+		}
+	case "off":
+	default:
+		log.Fatal("STORAGE must be db, fs or off")
+	}
 	allowPrivate := os.Getenv("WEBHOOK_ALLOW_PRIVATE") == "1" // 仅本地开发
 	a := &api.API{St: st, IM: svc, AdminToken: os.Getenv("ADMIN_TOKEN"), AllowPrivateWebhook: allowPrivate, Ready: ready}
 	runCtx, stopRun := context.WithCancel(context.Background())

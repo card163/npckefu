@@ -323,7 +323,7 @@ func (s *Service) handle(c *Conn, in inbound) {
 		}
 	}
 	fail := func(err error) {
-		if !errors.Is(err, ErrForbidden) && !errors.Is(err, ErrBadInput) && !errors.Is(err, ErrClosed) && !errors.Is(err, ErrSensitive) && !errors.Is(err, store.ErrNotFound) {
+		if !errors.Is(err, ErrForbidden) && !errors.Is(err, ErrBadInput) && !errors.Is(err, ErrClosed) && !errors.Is(err, ErrSensitive) && !errors.Is(err, ErrBadFile) && !errors.Is(err, store.ErrNotFound) {
 			log.Printf("ws op=%s: %v", in.Op, err)
 			err = errors.New("internal error")
 		}
