@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -319,5 +320,56 @@ func TestClusterKickAcrossNodes(t *testing.T) {
 			}
 			return
 		}
+	}
+}
+
+// 两个节点同时在扫描：每次排队提醒仍然恰好发一次（"认领"是数据库里的原子更新）。
+func TestClusterQueueRemindersOnce(t *testing.T) {
+	old := store.MinRemindEvery
+	store.MinRemindEvery = 1
+	t.Cleanup(func() { store.MinRemindEvery = old })
+	e := newClusterEnv(t)
+	a, b := e.nodes[0], e.addNode(t, "node-b", 30*time.Second)
+	if c := do(t, "PUT", a.srv.URL+"/v1/settings/queue", e.h, map[string]any{"remind_after": 1, "remind_every": 1, "remind_max": 3, "alert_after": 2, "giveup_after": 0}, nil); c != 200 {
+		t.Fatalf("settings: %d", c)
+	}
+	v := e.visitor(t)
+	vc := dial(t, b.srv.URL, e.tenant.AppKey, v) // 访客连在 B，A、B 两个节点都在扫描
+	defer vc.Close()
+	vc.WriteJSON(map[string]any{"op": "start"})
+	s := wait(t, vc, func(x im.Event) bool { return x.Op == "session" }).Session
+	vc.WriteJSON(map[string]any{"op": "send", "session_id": s.ID, "client_msg_id": "q", "body": "转人工"})
+	time.Sleep(6 * time.Second)
+	msgs, _ := e.st.MessagesSince(context.Background(), e.tenant.ID, s.ID, 0, 500)
+	reminders := 0
+	for _, m := range msgs {
+		if m.FromRole == "system" && strings.Contains(m.Body, "排在第") {
+			reminders++
+		}
+	}
+	if reminders != 3 {
+		t.Fatalf("want exactly 3 reminders (remind_max) with two sweeping nodes, got %d", reminders)
+	}
+	if evs := e.eventsOf("session.queue_timeout", 1); len(evs) != 1 {
+		t.Fatalf("queue_timeout must fire once across nodes, got %d", len(evs))
+	}
+}
+
+// eventsOf 等待片刻后返回收到的某类回调事件。
+func (e *clusterEnv) eventsOf(typ string, wantAtLeast int) []map[string]any {
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		e.mu.Lock()
+		var out []map[string]any
+		for _, ev := range e.events {
+			if ev["type"] == typ {
+				out = append(out, ev)
+			}
+		}
+		e.mu.Unlock()
+		if len(out) >= wantAtLeast || time.Now().After(deadline) {
+			return out
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

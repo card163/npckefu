@@ -30,6 +30,7 @@ type Event struct {
 	ClientMsgID string             `json:"client_msg_id,omitempty"`
 	Seq         int64              `json:"seq,omitempty"`
 	Position    int                `json:"position,omitempty"`
+	Wait        int                `json:"wait,omitempty"`
 	Error       string             `json:"error,omitempty"`
 	Score       int                `json:"score,omitempty"`
 	Comment     string             `json:"comment,omitempty"`

@@ -58,6 +58,7 @@ type Session struct {
 	LastMsgAt    *time.Time `json:"last_msg_at,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
 	ClosedAt     *time.Time `json:"closed_at,omitempty"`
+	QueuedAt     *time.Time `json:"queued_at,omitempty"` // 进入排队的时间（不在排队时为空）
 }
 
 type Message struct {
@@ -105,6 +106,7 @@ var schema = []string{
   bot_misses INT NOT NULL DEFAULT 0, last_seq BIGINT NOT NULL DEFAULT 0,
   last_msg_at DATETIME(3) NULL, last_msg_body VARCHAR(255) NOT NULL DEFAULT '',
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), closed_at DATETIME(3) NULL,
+  queued_at DATETIME(3) NULL, queue_reminders INT NOT NULL DEFAULT 0, queue_alerted TINYINT NOT NULL DEFAULT 0,
   KEY idx_visitor(tenant_id, visitor_accid, status),
   KEY idx_agent(tenant_id, agent_accid, status),
   KEY idx_status(tenant_id, status, id),
@@ -162,6 +164,11 @@ var schema = []string{
   note VARCHAR(1000) NOT NULL DEFAULT '', done TINYINT NOT NULL DEFAULT 0,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   KEY idx_session(tenant_id, session_id, id), KEY idx_pending(tenant_id, done, session_id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+	// 排队超时设置（每租户一行；没有则用默认值）。0 表示关闭对应功能。
+	`CREATE TABLE IF NOT EXISTS queue_settings(
+  tenant_id BIGINT PRIMARY KEY, remind_after INT NOT NULL, remind_every INT NOT NULL, remind_max INT NOT NULL,
+  alert_after INT NOT NULL, giveup_after INT NOT NULL, remind_message VARCHAR(500) NOT NULL, giveup_message VARCHAR(500) NOT NULL,
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 	`CREATE TABLE IF NOT EXISTS faqs(
   id BIGINT AUTO_INCREMENT PRIMARY KEY, tenant_id BIGINT NOT NULL,
   question VARCHAR(512) NOT NULL, answer TEXT NOT NULL, keywords VARCHAR(512) NOT NULL DEFAULT '',
@@ -209,6 +216,9 @@ func Open(dsn string) (*Store, error) {
 		{"sessions", "last_msg_at", "DATETIME(3) NULL"},
 		{"sessions", "last_msg_body", "VARCHAR(255) NOT NULL DEFAULT ''"},
 		{"accounts", "last_seen_at", "DATETIME(3) NULL"},
+		{"sessions", "queued_at", "DATETIME(3) NULL"},
+		{"sessions", "queue_reminders", "INT NOT NULL DEFAULT 0"},
+		{"sessions", "queue_alerted", "TINYINT NOT NULL DEFAULT 0"},
 	} {
 		if err := st.ensureColumn(ctx, c[0], c[1], c[2]); err != nil {
 			return nil, fmt.Errorf("migrate: %w", err)
@@ -321,16 +331,15 @@ func (s *Store) ListAccounts(ctx context.Context, tenantID int64, role string) (
 
 // ---- sessions ----
 
-const sessCols = `id,tenant_id,visitor_accid,agent_accid,status,skill_group,bot_misses,last_seq,last_msg_body,last_msg_at,created_at,closed_at`
-const sessColsS = `s.id,s.tenant_id,s.visitor_accid,s.agent_accid,s.status,s.skill_group,s.bot_misses,s.last_seq,s.last_msg_body,s.last_msg_at,s.created_at,s.closed_at`
+const sessCols = `id,tenant_id,visitor_accid,agent_accid,status,skill_group,bot_misses,last_seq,last_msg_body,last_msg_at,created_at,closed_at,queued_at`
+const sessColsS = `s.id,s.tenant_id,s.visitor_accid,s.agent_accid,s.status,s.skill_group,s.bot_misses,s.last_seq,s.last_msg_body,s.last_msg_at,s.created_at,s.closed_at,s.queued_at`
 
-func scanSession(sc interface{ Scan(...any) error }) (*Session, error) {
+// scanSessionRow 扫描 sessCols 的各列，extra 是紧随其后的附加列。
+func scanSessionRow(sc interface{ Scan(...any) error }, extra ...any) (*Session, error) {
 	x := &Session{}
-	var closed, lastAt sql.NullTime
-	if err := sc.Scan(&x.ID, &x.TenantID, &x.VisitorAccid, &x.AgentAccid, &x.Status, &x.SkillGroup, &x.BotMisses, &x.LastSeq, &x.LastMsg, &lastAt, &x.CreatedAt, &closed); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrNotFound
-		}
+	var closed, lastAt, queued sql.NullTime
+	dest := append([]any{&x.ID, &x.TenantID, &x.VisitorAccid, &x.AgentAccid, &x.Status, &x.SkillGroup, &x.BotMisses, &x.LastSeq, &x.LastMsg, &lastAt, &x.CreatedAt, &closed, &queued}, extra...)
+	if err := sc.Scan(dest...); err != nil {
 		return nil, err
 	}
 	if closed.Valid {
@@ -339,7 +348,18 @@ func scanSession(sc interface{ Scan(...any) error }) (*Session, error) {
 	if lastAt.Valid {
 		x.LastMsgAt = &lastAt.Time
 	}
+	if queued.Valid {
+		x.QueuedAt = &queued.Time
+	}
 	return x, nil
+}
+
+func scanSession(sc interface{ Scan(...any) error }) (*Session, error) {
+	x, err := scanSessionRow(sc)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return x, err
 }
 
 func (s *Store) Session(ctx context.Context, tenantID, id int64) (*Session, error) {
@@ -416,10 +436,14 @@ func (s *Store) ActiveLoad(ctx context.Context, tenantID int64) (map[string]int,
 	return m, rows.Err()
 }
 
+// SetSessionStatus 改状态。进入 queued 时记录排队起点并清零提醒计数；离开 queued 时清除排队起点。
 func (s *Store) SetSessionStatus(ctx context.Context, tenantID, id int64, status, agent string) error {
-	q := `UPDATE sessions SET status=?, agent_accid=? WHERE tenant_id=? AND id=?`
-	if status == StatusClosed {
-		q = `UPDATE sessions SET status=?, agent_accid=?, closed_at=CURRENT_TIMESTAMP WHERE tenant_id=? AND id=?`
+	q := `UPDATE sessions SET status=?, agent_accid=?, queued_at=NULL WHERE tenant_id=? AND id=?`
+	switch status {
+	case StatusClosed:
+		q = `UPDATE sessions SET status=?, agent_accid=?, queued_at=NULL, closed_at=CURRENT_TIMESTAMP WHERE tenant_id=? AND id=?`
+	case StatusQueued:
+		q = `UPDATE sessions SET status=?, agent_accid=?, queued_at=NOW(3), queue_reminders=0, queue_alerted=0 WHERE tenant_id=? AND id=?`
 	}
 	_, err := s.db.ExecContext(ctx, q, status, agent, tenantID, id)
 	return err

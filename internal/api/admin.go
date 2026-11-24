@@ -53,6 +53,16 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request, t *store.Tenant) 
 			online++
 		}
 	}
+	qs, err := a.St.QueueSettings(ctx, t.ID)
+	if err != nil {
+		serverErr(w, err)
+		return
+	}
+	qCount, qLongest, qOverdue, err := a.St.QueueStats(ctx, t.ID, qs.AlertAfter)
+	if err != nil {
+		serverErr(w, err)
+		return
+	}
 	rs, err := a.St.RatingStats(ctx, t.ID, since, time.Now().Add(time.Minute), "")
 	if err != nil {
 		serverErr(w, err)
@@ -63,6 +73,7 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request, t *store.Tenant) 
 		"agents":   map[string]int{"total": len(roster), "online": online},
 		"sessions": map[string]int{"total": sessions, "human": human},
 		"messages": messages,
+		"queue":    map[string]int{"count": qCount, "longest_wait": qLongest, "overdue": qOverdue, "alert_after": qs.AlertAfter},
 		"rating":   map[string]any{"count": rs.Count, "avg": rs.Avg, "satisfaction_rate": rs.SatisfactionRate},
 	})
 }
@@ -130,4 +141,28 @@ func (a *API) retryWebhookEvent(w http.ResponseWriter, r *http.Request, t *store
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// GET /v1/settings/queue —— 排队超时设置（没保存过时返回默认值，is_default=true）。
+func (a *API) getQueueSettings(w http.ResponseWriter, r *http.Request, t *store.Tenant) {
+	v, err := a.St.QueueSettings(r.Context(), t.ID)
+	respondObj(w, v, err)
+}
+
+// PUT /v1/settings/queue —— 保存排队超时设置：到点提醒访客、超时告警、可选放弃排队。秒数为 0 表示关闭该功能。
+func (a *API) putQueueSettings(w http.ResponseWriter, r *http.Request, t *store.Tenant) {
+	var in store.QueueSettings
+	if !decode(w, r, &in) {
+		return
+	}
+	if err := in.Validate(); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := a.St.SaveQueueSettings(r.Context(), t.ID, in); err != nil {
+		serverErr(w, err)
+		return
+	}
+	in.IsDefault = false
+	writeJSON(w, http.StatusOK, in)
 }

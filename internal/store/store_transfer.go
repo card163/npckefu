@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -29,11 +30,14 @@ func (s *Store) ApplyTransfer(ctx context.Context, tenantID int64, t *Transfer, 
 	if newAgent != "" {
 		status = StatusActive
 	}
-	q := `UPDATE sessions SET agent_accid=?, status=? WHERE id=? AND tenant_id=? AND status='active' AND agent_accid=?`
+	q := `UPDATE sessions SET agent_accid=?, status=?, queued_at=NULL WHERE id=? AND tenant_id=? AND status='active' AND agent_accid=?`
 	args := []any{newAgent, status, t.SessionID, tenantID, t.FromAgent}
 	if newSkillGroup != "" {
-		q = `UPDATE sessions SET agent_accid=?, status=?, skill_group=? WHERE id=? AND tenant_id=? AND status='active' AND agent_accid=?`
+		q = `UPDATE sessions SET agent_accid=?, status=?, skill_group=?, queued_at=NULL WHERE id=? AND tenant_id=? AND status='active' AND agent_accid=?`
 		args = []any{newAgent, status, newSkillGroup, t.SessionID, tenantID, t.FromAgent}
+	}
+	if newAgent == "" { // 退回队列：从现在起计排队时间
+		q = strings.Replace(q, "queued_at=NULL", "queued_at=NOW(3), queue_reminders=0, queue_alerted=0", 1)
 	}
 	r, err := tx.ExecContext(ctx, q, args...)
 	if err != nil {
@@ -55,7 +59,7 @@ func (s *Store) ApplyTransfer(ctx context.Context, tenantID int64, t *Transfer, 
 
 // PendingTransfers 返回当前"已退回队列、尚未被接手"的转接（按会话 ID 索引），供分配时排除原坐席并把备注交给接手人。
 func (s *Store) PendingTransfers(ctx context.Context, tenantID int64) (map[int64]Transfer, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,session_id,from_agent,skill_group,note,created_at FROM session_transfers WHERE tenant_id=? AND done=0 ORDER BY id`, tenantID)
+	rows, err := s.db.QueryContext(ctx, `SELECT t.id,t.session_id,t.from_agent,t.skill_group,t.note,t.created_at FROM session_transfers t WHERE t.tenant_id=? AND t.done=0 AND EXISTS (SELECT 1 FROM sessions s WHERE s.id=t.session_id AND s.status='queued') ORDER BY t.id`, tenantID)
 	if err != nil {
 		return nil, err
 	}

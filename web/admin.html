@@ -94,6 +94,7 @@ const hm=s=>new Date(s).toLocaleTimeString('zh-CN',{hour12:false});
 const stars=n=>h('span',{class:'star'},'★'.repeat(n)+'☆'.repeat(5-n));
 const STATUS={bot:'机器人接待',queued:'排队中',active:'接待中',closed:'已结束',pending:'待投递',done:'已送达',dead:'投递失败',dropped:'已丢弃'};
 const badge=s=>h('span',{class:'badge '+s},STATUS[s]||s);
+const fmtDur=sec=>{sec=Math.max(0,Math.round(sec));return sec<60?sec+' 秒':Math.floor(sec/60)+' 分 '+(sec%60)+' 秒'};
 const IMG_URL=/^\/files\/[0-9a-f]{32}$/;
 
 function toast(msg,kind){const t=h('div',{class:'toast '+(kind||'')},msg);document.getElementById('toasts').append(t);setTimeout(()=>t.remove(),kind==='err'?6000:3000)}
@@ -143,7 +144,7 @@ function showLogin(msg){
 const PAGES=[
   ['dashboard','概览','📊',pageDashboard],['sessions','会话','💬',pageSessions],['agents','坐席','🧑‍💼',pageAgents],
   ['faq','知识库','📚',pageFaq],['words','敏感词','🚫',pageWords],['ratings','评价','⭐',pageRatings],
-  ['webhook','回调','🔔',pageWebhook],['access','接入','🔌',pageAccess]];
+  ['webhook','回调','🔔',pageWebhook],['settings','设置','⚙️',pageSettings],['access','接入','🔌',pageAccess]];
 
 function showShell(){
   const nav=h('nav',{class:'side'},h('div',{class:'brand'},'客服管理后台'),PAGES.map(([k,t,i])=>h('a',{href:'#/'+k,'data-k':k},i+' ',h('span',{},t))));
@@ -170,7 +171,7 @@ async function pageDashboard(root){
     const [ov,ro,q]=await Promise.all([api('GET','/v1/stats/overview?since='+encodeURIComponent(d.toISOString())),api('GET','/v1/agents/roster'),api('GET','/v1/sessions?status=queued&limit=20')]);
     const r=ov.rating;
     cards.replaceChildren(
-      card('排队中',ov.live.queued,ov.live.queued?'访客正在等待人工':'没有人在排队',ov.live.queued?'warn':''),
+      card('排队中',ov.queue.count,ov.queue.overdue?ov.queue.overdue+' 人已排队超时 · 最长 '+fmtDur(ov.queue.longest_wait):ov.queue.count?'最长已等 '+fmtDur(ov.queue.longest_wait):'没有人在排队',ov.queue.overdue?'bad':ov.queue.count?'warn':''),
       card('人工接待中',ov.live.active,'进行中的人工会话'),
       card('机器人接待中',ov.live.bot,'尚未转人工'),
       card('在线坐席',ov.agents.online+' / '+ov.agents.total,ov.agents.online?'':'当前没有在线坐席',ov.agents.online?'':'bad'),
@@ -181,8 +182,9 @@ async function pageDashboard(root){
       h('tbody',{},ro.map(a=>h('tr',{},h('td',{},a.name||a.accid,h('div',{class:'mut mono'},a.accid)),h('td',{},a.skill_group||'-'),
         h('td',{},h('span',{class:'dot '+(a.online?'on':'')}),a.online?'在线':'离线'),
         h('td',{},h('div',{class:'bar '+(a.load>=a.max_load?'full':'')},h('i',{style:'width:'+Math.min(100,a.load/a.max_load*100)+'%'})),h('span',{class:'mut'},a.load+' / '+a.max_load))))))):h('div',{class:'empty'},'还没有坐席，去“坐席”页添加'));
-    queue.replaceChildren(h('h3',{},'排队中的会话'),q.length?h('div',{class:'tablewrap'},h('table',{},h('thead',{},h('tr',{},['会话','访客','技能组','创建时间'].map(x=>h('th',{},x)))),
-      h('tbody',{},q.map(s=>h('tr',{class:'click',onclick:()=>openSession(s.id)},h('td',{},'#'+s.id),h('td',{class:'mono'},s.visitor_accid),h('td',{},s.skill_group||'-'),h('td',{},fmt(s.created_at))))))):h('div',{class:'empty'},'当前没有排队'))}
+    queue.replaceChildren(h('h3',{},'排队中的会话'),q.length?h('div',{class:'tablewrap'},h('table',{},h('thead',{},h('tr',{},['会话','访客','技能组','已等待'].map(x=>h('th',{},x)))),
+      h('tbody',{},q.map(s=>{const w=s.queued_at?(Date.now()-new Date(s.queued_at))/1000:0,late=ov.queue.alert_after>0&&w>=ov.queue.alert_after;
+        return h('tr',{class:'click',onclick:()=>openSession(s.id)},h('td',{},'#'+s.id),h('td',{class:'mono'},s.visitor_accid),h('td',{},s.skill_group||'-'),h('td',{style:late?'color:var(--err);font-weight:600':''},s.queued_at?fmtDur(w)+(late?' ⚠':''):'-'))})))):h('div',{class:'empty'},'当前没有排队'))}
   await load();const t=setInterval(()=>load().catch(()=>{}),5000);return()=>clearInterval(t)}
 
 /* ============ 会话 ============ */
@@ -401,6 +403,30 @@ async function pageWebhook(root){
   evp.append(h('h3',{},'投递记录',h('span',{class:'row'},sel,h('button',{class:'btn',onclick:safe(()=>loadEv(true))},'刷新'))),
     h('div',{class:'tablewrap'},h('table',{},h('thead',{},h('tr',{},['事件 ID','类型','状态','尝试','最近错误','时间',''].map(x=>h('th',{},x)))),tbody)),h('div',{class:'row',style:'justify-content:center;margin-top:12px'},moreBtn));
   await Promise.all([loadCfg(),loadEv(true)])}
+
+/* ============ 设置：排队超时 ============ */
+async function pageSettings(root){
+  const num=(v,min,max)=>h('input',{type:'number',min,max,value:v,style:'width:140px'});
+  async function load(){
+    const q=await api('GET','/v1/settings/queue');
+    const f={remind_after:num(q.remind_after,0,86400),remind_every:num(q.remind_every,0,86400),remind_max:num(q.remind_max,0,20),alert_after:num(q.alert_after,0,86400),giveup_after:num(q.giveup_after,0,86400),
+      remind_message:h('textarea',{rows:2,maxlength:200},q.remind_message),giveup_message:h('textarea',{rows:2,maxlength:200},q.giveup_message)};
+    f.remind_message.value=q.remind_message;f.giveup_message.value=q.giveup_message;
+    const read=()=>({remind_after:+f.remind_after.value||0,remind_every:+f.remind_every.value||0,remind_max:+f.remind_max.value||0,alert_after:+f.alert_after.value||0,giveup_after:+f.giveup_after.value||0,remind_message:f.remind_message.value.trim(),giveup_message:f.giveup_message.value.trim()});
+    root.replaceChildren(h('div',{class:'panel'},h('h3',{},'排队超时处理',q.is_default&&h('span',{class:'badge'},'当前为默认设置')),
+      h('p',{class:'mut',style:'margin-top:0'},'访客转人工后如果一直没有坐席接待，系统会按下面的规则处理。时间单位都是秒，填 0 表示关闭对应功能。'),
+      h('div',{class:'sec'},'1. 提醒访客'),
+      h('div',{class:'row'},field('排队多久后第一次提醒',f.remind_after,'0 = 不提醒'),field('之后每隔',f.remind_every,'至少 10 秒'),field('最多提醒几次',f.remind_max)),
+      field('提醒内容',f.remind_message,'可用 {position}＝排队位置、{ahead}＝前面还有几位。会作为系统消息发给访客。'),
+      h('div',{class:'sec'},'2. 超时告警（通知坐席和你的系统）'),
+      field('排队多久算超时',f.alert_after,'到点后：在线坐席的工作台弹出提示、概览页标红，并触发 session.queue_timeout 回调。0 = 不告警'),
+      h('div',{class:'sec'},'3. 放弃排队（可选）'),
+      field('排队多久后放弃',f.giveup_after,'到点后把访客退回智能助手，并发送下面的话；访客可再次转人工重新排队。0 = 一直排队'),
+      field('放弃时对访客说',f.giveup_message),
+      h('div',{class:'row',style:'margin-top:8px'},h('button',{class:'btn primary',onclick:safe(async()=>{await api('PUT','/v1/settings/queue',read());toast('已保存');await load()})},'保存'),
+        h('button',{class:'btn',onclick:safe(async()=>{if(await confirmBox('恢复为系统默认的排队超时设置？','恢复默认')){const d={remind_after:60,remind_every:60,remind_max:3,alert_after:180,giveup_after:0,remind_message:'',giveup_message:''};await api('PUT','/v1/settings/queue',d);toast('已恢复默认');await load()}})},'恢复默认'))),
+      h('div',{class:'panel'},h('h3',{},'说明'),h('div',{class:'mut'},'• 排队时间从访客进入排队（或坐席把会话退回队列）的那一刻算起；被坐席接待、访客结束会话或放弃排队后停止。',h('br'),'• 系统每 5 秒检查一次，所以实际触发时间会有几秒误差。',h('br'),'• 每次提醒、每次告警都只会发一次，多台服务器同时运行也不会重复。')))}
+  await load()}
 
 /* ============ 接入 ============ */
 async function pageAccess(root){

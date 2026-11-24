@@ -10,6 +10,22 @@
     # 可选 LLM（OpenAI 兼容）：LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
     TEST_MYSQL_DSN='root:@tcp(127.0.0.1:3306)/npckefu_test' go test -race ./...   # 未设置则跳过需要数据库的测试
 
+## 排队超时提醒
+访客转人工后若没有坐席接待，按租户设置（管理后台“设置”页，或 `PUT /v1/settings/queue`）自动处理，三段都可单独关闭（填 0）：
+
+| 设置 | 默认 | 作用 |
+|---|---|---|
+| `remind_after` / `remind_every` / `remind_max` | 60 / 60 / 3 秒·次 | 排队满 `remind_after` 秒后给访客发一条系统消息（含排队位置），之后每隔 `remind_every` 秒再发，最多 `remind_max` 次 |
+| `remind_message` | “…您当前排在第 {position} 位…” | 提醒文案，可用 `{position}`（排队位置）、`{ahead}`（前面还有几位） |
+| `alert_after` | 180 秒 | 排队满这么久算**超时**：在线坐席（按技能组）的工作台收到 `queue_alert` 提示，租户收到 `session.queue_timeout` 回调（含 `waited_seconds`、`position`、`queue_length`），概览页排队卡片标红、列表显示已等待时长 |
+| `giveup_after` / `giveup_message` | 0（不放弃） | 排队满这么久就**放弃排队**：会话退回机器人接待、发送 `giveup_message`，租户收到 `session.queue_giveup`；访客可再次转人工重新排队 |
+
+- **计时起点**：访客进入排队，或坐席把会话退回队列/技能组的那一刻；被接待、访客结束会话或放弃排队后停止。
+- **精度**：由后台扫描驱动（默认每 5 秒一轮），实际触发时间有几秒误差。**改设置后，已经排队很久的会话会立刻补发**（每轮每个会话最多补一条提醒）。
+- **不重复**：每次提醒、告警、放弃都是数据库里的原子“认领”，多个节点同时扫描也只会发一次（有双节点测试）。
+- **排队位置**按进入排队的先后；暂不区分技能组（带技能组的会话位置仍按全体排队者计算）。
+- 提醒文案是租户自己填写的，**不经过敏感词过滤**。
+
 ## 会话历史导出
     curl -H "X-App-Key: …" -H "X-App-Secret: …" -o sessions.csv "https://HOST/v1/export/sessions?from=2026-11-01&to=2026-11-30&tz=Asia/Shanghai"
     curl … -o messages.jsonl "https://HOST/v1/export/messages?format=jsonl&status=closed&exclude_system=1"
@@ -22,10 +38,10 @@
 
 ## 管理后台
 `/admin.html`（内嵌，无需构建）。用租户的 **App Key / App Secret** 登录——这是租户所有者的凭证。页面：
-- **概览**（每 5 秒刷新）：排队/人工接待/机器人接待会话数、在线坐席、今日会话/消息/满意度、坐席负载、排队列表。
+- **概览**（每 5 秒刷新）：排队（含超时人数、最长等待）/人工接待/机器人接待会话数、在线坐席、今日会话/消息/满意度、坐席负载、排队列表。
 - **会话**：按状态/坐席/访客筛选并翻页；可**导出**；点开查看完整聊天记录（含图片）、转接记录、访客评价；可**转接**、**强制结束**。
 - **坐席**：新增/编辑（名称、技能组、接待上限）、**重置令牌**（旧令牌立即失效并踢掉其连接）；新建/重置后显示一次登录信息。
-- **知识库**（增删改、搜索）、**敏感词**（批量添加、屏蔽/拒绝）、**评价**（区间统计、分布、各坐席、评价列表）、**回调**（地址、签名密钥显示/复制/轮换、投递记录与失败重试）、**接入**（App Key、访客页链接、iframe 嵌入代码）。
+- **知识库**（增删改、搜索）、**敏感词**（批量添加、屏蔽/拒绝）、**评价**（区间统计、分布、各坐席、评价列表）、**回调**（地址、签名密钥显示/复制/轮换、投递记录与失败重试）、**设置**（排队超时提醒）、**接入**（App Key、访客页链接、iframe 嵌入代码）。
 - **安全与取舍**：Secret 只存在**当前标签页**的 sessionStorage，退出/关闭即清除，每次请求通过请求头发送，因此**务必使用 HTTPS**；页面用文本节点渲染所有数据（不使用 innerHTML），租户或访客提交的内容不会被当作 HTML 执行（已验证）。这是**单一租户凭证登录**，没有多管理员账号、角色权限和操作审计——需要时应加一层管理员账号体系，而不是把 Secret 发给更多人。
 - 目前不支持删除坐席、导出数据；坐席账号一旦创建只能编辑（防止删除后历史会话指向不存在的账号）。
 
@@ -64,6 +80,7 @@
 | GET /v1/sessions/{id}, /v1/sessions/{id}/messages?since= | 租户 | 单个会话 / 消息 |
 | POST /v1/sessions/{id}/close | 租户 | 强制结束会话（访客与坐席收到通知） |
 | GET /v1/export/sessions, GET /v1/export/messages | 租户 | 导出会话列表 / 聊天记录（CSV 或 JSONL，流式输出），见下文“会话历史导出” |
+| GET/PUT /v1/settings/queue | 租户 | 排队超时设置（没保存过时返回默认值，`is_default:true`），见下文“排队超时提醒” |
 | GET /v1/tenant | 租户 | 校验凭证，返回租户名与 app_key（不含 secret） |
 | GET /v1/stats/overview?since= | 租户 | 概览：实时排队/接待/机器人会话数、坐席在线数，以及 since 起（默认 24 小时）的会话/消息/评价 |
 | GET /v1/agents/roster | 租户 | 坐席名单：在线、当前接待数/上限、技能组 |
@@ -89,7 +106,7 @@
 ## WebSocket `/ws?appkey=&accid=&token=`
 客户端 → 服务端 `op`: `start`(访客开始咨询) · `send`{session_id,client_msg_id,type,body} · `sync`{session_id,since_seq} · `close` · `typing` · `ping`
 客户端另有：`recent`{include_closed}（最近会话+未读）· `read`{session_id,seq}（推进已读游标，不会超过最新 seq，并同步给同账号其他端）
-服务端 → 客户端 `op`: `session` · `msg` · `ack` · `queue`{position} · `synced` · `recent` · `read` · `typing` · `error`
+服务端 → 客户端 `op`: `queue_alert`{session_id,wait,position}（仅坐席：有访客排队超时）· `session` · `msg` · `ack` · `queue`{position} · `synced` · `recent` · `read` · `typing` · `error`
 
 ## 坐席转接
 坐席在工作台点“转接”，或经 WebSocket：`{"op":"transfer","session_id":…,"to_agent":"…"|"skill_group":"…","note":"…"}`（`{"op":"agents"}` 取同事名单：在线状态、当前接待数/上限、技能组）。三种方式：
@@ -142,7 +159,7 @@
 - 一个 token 同时只属于一个账号（同机换号登录时自动转移）；每账号最多保留最近 10 台设备。
 
 ## 消息回调（抄送）
-配置 `PUT /v1/webhook` 后，以下事件会 POST 到你的地址：`message.created`（所有消息，含机器人/系统/服务端下发）、`message.moderated`、`push.offline`、`presence.changed`、`session.rated`、`session.transferred`、`session.created` / `session.queued` / `session.assigned` / `session.closed`。
+配置 `PUT /v1/webhook` 后，以下事件会 POST 到你的地址：`message.created`（所有消息，含机器人/系统/服务端下发）、`message.moderated`、`push.offline`、`presence.changed`、`session.rated`、`session.transferred`、`session.queue_timeout`、`session.queue_giveup`、`session.created` / `session.queued` / `session.assigned` / `session.closed`。
     POST <url>   {"event_id":123,"type":"message.created","created_at":<ms>,"data":{"session":{...},"message":{...}}}
     X-Kefu-Event-Id / X-Kefu-Event-Type / X-Kefu-Timestamp(秒) / X-Kefu-Signature: sha256=hex(HMAC_SHA256(secret, timestamp + "." + body))
 - 返回 2xx 即成功；否则按 10s、30s、2m、10m、30m、1h、3h 退避重试，共 8 次后标记 dead。

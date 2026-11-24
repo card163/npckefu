@@ -140,17 +140,11 @@ ORDER BY COALESCE(s.last_msg_at, s.created_at) DESC, s.id DESC LIMIT ?`,
 	var out []RecentItem
 	for rows.Next() {
 		var it RecentItem
-		var closed, lastAt sql.NullTime
-		x := &it.Session
-		if err := rows.Scan(&x.ID, &x.TenantID, &x.VisitorAccid, &x.AgentAccid, &x.Status, &x.SkillGroup, &x.BotMisses, &x.LastSeq, &x.LastMsg, &lastAt, &x.CreatedAt, &closed, &it.Unread); err != nil {
+		x, err := scanSessionRow(rows, &it.Unread)
+		if err != nil {
 			return nil, err
 		}
-		if closed.Valid {
-			x.ClosedAt = &closed.Time
-		}
-		if lastAt.Valid {
-			x.LastMsgAt = &lastAt.Time
-		}
+		it.Session = *x
 		out = append(out, it)
 	}
 	return out, rows.Err()

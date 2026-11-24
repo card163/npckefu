@@ -82,6 +82,7 @@ func (s *Service) Run(ctx context.Context) {
 			}
 			for _, id := range ids {
 				s.Dispatch(ctx, id)
+				s.queueWatch(ctx, id)
 			}
 		}
 	}

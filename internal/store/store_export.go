@@ -33,19 +33,7 @@ func (f ExportFilter) args(tenantID int64, after int64, n int) []any {
 const exportWhere = ` WHERE s.tenant_id=? AND s.created_at>=? AND s.created_at<? AND (?='' OR s.status=?) AND (?='' OR s.agent_accid=?) AND (?='' OR s.visitor_accid=?) AND s.id>? ORDER BY s.id LIMIT ?`
 
 func scanSessionCols(rows *sql.Rows, extra ...any) (*Session, error) {
-	x := &Session{}
-	var closed, lastAt sql.NullTime
-	dest := append([]any{&x.ID, &x.TenantID, &x.VisitorAccid, &x.AgentAccid, &x.Status, &x.SkillGroup, &x.BotMisses, &x.LastSeq, &x.LastMsg, &lastAt, &x.CreatedAt, &closed}, extra...)
-	if err := rows.Scan(dest...); err != nil {
-		return nil, err
-	}
-	if closed.Valid {
-		x.ClosedAt = &closed.Time
-	}
-	if lastAt.Valid {
-		x.LastMsgAt = &lastAt.Time
-	}
-	return x, nil
+	return scanSessionRow(rows, extra...)
 }
 
 func pageSize(f ExportFilter, emitted int) int {

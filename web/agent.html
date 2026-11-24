@@ -86,6 +86,7 @@ function on(ev){
   else if(ev.op==='agents')fillRoster(ev.agents||[]);
   else if(ev.op==='transfer_ok'){$('xfer-mask').hidden=true}
   else if(ev.op==='transferred'){toast('会话 #'+ev.session_id+' 由 '+ev.from+' 转入'+(ev.note?'：'+ev.note:''))}
+  else if(ev.op==='queue_alert'){const s=ev.wait||0;toast('⏰ 会话 #'+ev.session_id+' 的访客已排队 '+(s<60?s+' 秒':Math.floor(s/60)+' 分 '+(s%60)+' 秒')+'，排在第 '+ev.position+' 位，有空请尽快接待')}
   else if(ev.op==='rated'){const t=document.createElement('div');t.className='toast';const b=document.createElement('b');b.textContent='★'.repeat(ev.score)+'☆'.repeat(5-ev.score);
     t.append('访客 '+ev.from+' 评价了会话 #'+ev.session_id+'：',b);if(ev.comment)t.append('  '+ev.comment);$('toasts').append(t);setTimeout(()=>t.remove(),10000)}
   else if(ev.op==='error')alert(ev.error);
